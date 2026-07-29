@@ -1,6 +1,7 @@
 """5. Otomatik güncelleme servisi: sürüm karşılaştırma, indirme, kurulum, UI."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -421,26 +422,9 @@ class TestUpdaterService:
 # 5.5 Sessiz kurulum
 # ======================================================================
 class TestSessizKurulum:
-    def test_inno_setup_parametreleriyle_baslatilir(self, monkeypatch, tmp_path,
-                                                    temp_downloads):
-        kurulum = tmp_path / "setup.exe"
-        kurulum.write_bytes(b"MZ")
-        temp_downloads.mkdir(parents=True, exist_ok=True)
-        cagrilar: list = []
-
-        class SahteSurec:
-            pid = 4242
-
-        def sahte_popen(command, **kwargs):
-            cagrilar.append((command, kwargs))
-            return SahteSurec()
-
-        monkeypatch.setattr(up.subprocess, "Popen", sahte_popen)
-        surec = launch_installer(str(kurulum))
-
-        assert surec.pid == 4242
-        komut, kwargs = cagrilar[0]
-        assert komut[0] == str(kurulum)
+    def test_inno_setup_parametreleriyle_baslatilir(self, tmp_path):
+        komut = up.installer_command(str(tmp_path / "setup.exe"))
+        assert komut[0] == str(tmp_path / "setup.exe")
         assert "/SILENT" in komut
         assert "/CLOSEAPPLICATIONS" in komut
         assert any(arg.startswith("/LOG=") for arg in komut)
@@ -449,8 +433,85 @@ class TestSessizKurulum:
         # kurulum betiği bu bayrağı görünce uygulamayı kendisi başlatır.
         assert "/RESTARTAPP" in komut
         assert "/RESTARTAPPLICATIONS" not in komut
-        # Uygulama kapanınca kurulum ölmemeli
+        # Kapsam bildirilmezse Inno "tüm kullanıcılar mı?" diye sorar.
+        assert ("/ALLUSERS" in komut) or ("/CURRENTUSER" in komut)
+
+    def test_kurulum_betigi_surecleri_zorla_kapatir(self):
+        """Regresyon: XFA formu açıkken güncelleme geri alınıyordu.
+
+        ``CloseApplications=yes`` ile Restart Manager penceresiz
+        ``QtWebEngineProcess.exe``i (XFA formu açıkken çalışır) kapatamıyor,
+        "Some applications could not be shut down" deyip kurulumu geri
+        alıyordu. ``force`` yanıt vermeyen süreci zaman aşımından sonra
+        sonlandırır; ana pencere yine önce nazikçe kapatılır.
+        """
+        kok = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        betik = open(
+            os.path.join(kok, "AGY_PDF_Editor_Setup.iss"), encoding="utf-8"
+        ).read()
+        assert "\nCloseApplications=force" in betik
+
+    def test_program_files_kurulumu_tum_kullanicilar_olur(self, monkeypatch):
+        """Program Files'a kurulu uygulama yönetici hakkıyla güncellenmeli.
+
+        Kapsam bildirilmezse sessiz güncelleme fazladan bir soru sorar ve
+        yanlış seçim ikinci bir kopya kurar.
+        """
+        monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+        assert up.install_scope_args(r"C:\Program Files\AGY Software\App") == [
+            "/ALLUSERS"
+        ]
+
+    def test_kullanici_dizinindeki_kurulum_yonetici_istemez(self, monkeypatch):
+        monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+        assert up.install_scope_args(
+            r"C:\Users\x\AppData\Local\Programs\App"
+        ) == ["/CURRENTUSER"]
+
+    def test_kurulum_uygulama_kapanmadan_baslamaz(self, monkeypatch, tmp_path,
+                                                  temp_downloads):
+        """Yarış koşulu regresyonu.
+
+        Kurulum doğrudan başlatılırsa Inno'nun "uygulamalar kapatılıyor" adımı
+        hâlâ kapanmakta olan uygulamayla yarışır ve orada takılabilir; kurulum
+        bu yüzden süreç kimliğimiz bekletilerek başlatılır.
+        """
+        kurulum = tmp_path / "setup.exe"
+        kurulum.write_bytes(b"MZ")
+        temp_downloads.mkdir(parents=True, exist_ok=True)
+        cagrilar: list = []
+
+        monkeypatch.setattr(up.sys, "platform", "win32")
+        monkeypatch.setattr(up.shutil, "which", lambda _ad: r"C:\ps\powershell.exe")
+        monkeypatch.setattr(up.subprocess, "Popen",
+                            lambda c, **k: cagrilar.append((c, k)) or type("P", (), {})())
+        monkeypatch.setattr(up.os, "getpid", lambda: 1234)
+
+        launch_installer(str(kurulum))
+
+        komut, kwargs = cagrilar[0]
+        assert komut[0] == r"C:\ps\powershell.exe"
+        betik = base64.b64decode(komut[komut.index("-EncodedCommand") + 1]).decode(
+            "utf-16-le"
+        )
+        assert "Wait-Process -Id 1234" in betik
+        assert str(kurulum) in betik
+        assert "/SILENT" in betik
+        # Uygulama kapanınca bekleyici de ölmemeli
         assert kwargs.get("creationflags") or kwargs.get("start_new_session")
+
+    def test_powershell_yoksa_dogrudan_baslatilir(self, monkeypatch, tmp_path,
+                                                  temp_downloads):
+        kurulum = tmp_path / "setup.exe"
+        kurulum.write_bytes(b"MZ")
+        temp_downloads.mkdir(parents=True, exist_ok=True)
+        cagrilar: list = []
+        monkeypatch.setattr(up.shutil, "which", lambda _ad: None)
+        monkeypatch.setattr(up.subprocess, "Popen",
+                            lambda c, **k: cagrilar.append(c) or type("P", (), {})())
+        launch_installer(str(kurulum))
+        assert cagrilar[0][0] == str(kurulum)
+        assert "/SILENT" in cagrilar[0]
 
     def test_sessiz_olmayan_kurulumda_parametre_yok(self, monkeypatch, tmp_path,
                                                    temp_downloads):
@@ -458,6 +519,7 @@ class TestSessizKurulum:
         kurulum.write_bytes(b"MZ")
         temp_downloads.mkdir(parents=True, exist_ok=True)
         cagrilar: list = []
+        monkeypatch.setattr(up.shutil, "which", lambda _ad: None)
         monkeypatch.setattr(up.subprocess, "Popen",
                             lambda c, **k: cagrilar.append(c) or type("P", (), {})())
         launch_installer(str(kurulum), silent=False)
@@ -688,9 +750,19 @@ class TestUctanUcaAkis:
 
         assert baslatilan, "Kurulum başlatılmalı"
         komut = baslatilan[0]
-        assert komut[0].endswith("AGY_PDF_Editor_v2.5_Setup.exe")
-        assert os.path.isfile(komut[0]), "İndirilen dosya %TEMP% altında olmalı"
-        assert "/SILENT" in komut
+        # Windows'ta kurulum, uygulamanın kapanmasını bekleyen bir kabuk
+        # üzerinden başlatılır; komut satırı orada kodlanmış durur.
+        if "-EncodedCommand" in komut:
+            metin = base64.b64decode(
+                komut[komut.index("-EncodedCommand") + 1]
+            ).decode("utf-16-le")
+            yol = metin.split("-FilePath '", 1)[1].split("'", 1)[0]
+        else:
+            metin = " ".join(komut)
+            yol = komut[0]
+        assert yol.endswith("AGY_PDF_Editor_v2.5_Setup.exe")
+        assert os.path.isfile(yol), "İndirilen dosya %TEMP% altında olmalı"
+        assert "/SILENT" in metin
 
         son = QDeadlineTimer(2000)
         while not son.hasExpired() and not cikislar:

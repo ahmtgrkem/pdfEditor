@@ -27,10 +27,12 @@ Güvenlik: indirilen dosya çalıştırılacağı için varsayılan olarak yaln�
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -303,19 +305,62 @@ def download_directory() -> str:
     return os.path.join(tempfile.gettempdir(), DOWNLOAD_DIRNAME)
 
 
+def install_scope_args(app_dir: str | None = None) -> list[str]:
+    """Kurulumun **hangi kapsamda** yenileneceğini belirler.
+
+    Uygulama ``C:\\Program Files`` altındaysa kurulum tüm kullanıcılar için
+    yapılmıştır ve yönetici hakkı ister. Kapsam bildirilmezse Inno Setup
+    "tüm kullanıcılar mı, yalnızca ben mi?" diye sorar; sessiz güncellemede bu
+    fazladan bir soru demektir ve yanlış seçim ikinci bir kopya kurar.
+    """
+    dizin = app_dir or os.path.dirname(os.path.abspath(sys.argv[0]))
+    dizin = os.path.normcase(dizin)
+    for degisken in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        kok = os.environ.get(degisken)
+        if kok and dizin.startswith(os.path.normcase(kok)):
+            return ["/ALLUSERS"]
+    return ["/CURRENTUSER"]
+
+
+def installer_command(installer_path: str, silent: bool = True) -> list[str]:
+    """Kurulum için tam komut satırı."""
+    command = [installer_path]
+    if silent:
+        command.extend(SILENT_INSTALL_ARGS)
+        command.extend(install_scope_args())
+        command.append(f'/LOG={os.path.join(download_directory(), "install.log")}')
+    return command
+
+
+def _wait_then_run_script(pid: int, command: list[str]) -> str:
+    """``pid`` kapanınca ``command``ı çalıştıran PowerShell betiği."""
+    def tirnak(deger: str) -> str:
+        return "'" + str(deger).replace("'", "''") + "'"
+
+    argumanlar = ", ".join(tirnak(a) for a in command[1:])
+    satirlar = [
+        "$ErrorActionPreference='SilentlyContinue'",
+        f"Wait-Process -Id {int(pid)} -Timeout 120",
+        "Start-Sleep -Milliseconds 700",
+        f"Start-Process -FilePath {tirnak(command[0])}"
+        + (f" -ArgumentList {argumanlar}" if argumanlar else ""),
+    ]
+    return "; ".join(satirlar)
+
+
 def launch_installer(installer_path: str, silent: bool = True) -> subprocess.Popen:
     """Inno Setup kurulumunu ayrı (detached) bir süreç olarak başlatır.
 
-    Uygulama hemen ardından kapanacağı için süreç, ebeveyninden bağımsız
-    başlatılır; aksi hâlde uygulama kapanınca kurulum da sonlanır.
+    Kurulum, **uygulama tamamen kapandıktan sonra** başlatılır: doğrudan
+    başlatılırsa Inno'nun "uygulamalar kapatılıyor" adımı hâlâ kapanmakta olan
+    uygulamayla yarışır ve kurulum orada takılabilir. Bunun için PowerShell'e
+    süreç kimliğimizi bekletiriz; PowerShell yoksa ya da başlatılamazsa
+    doğrudan başlatmaya düşülür.
     """
     if not os.path.isfile(installer_path):
         raise FileNotFoundError(installer_path)
 
-    command = [installer_path]
-    if silent:
-        command.extend(SILENT_INSTALL_ARGS)
-        command.append(f'/LOG={os.path.join(download_directory(), "install.log")}')
+    command = installer_command(installer_path, silent=silent)
 
     kwargs: dict[str, Any] = {"close_fds": True, "cwd": download_directory()}
     if sys.platform == "win32":  # pragma: no cover - platforma bağlı
@@ -325,6 +370,20 @@ def launch_installer(installer_path: str, silent: bool = True) -> subprocess.Pop
         )
     else:
         kwargs["start_new_session"] = True
+
+    kabuk = shutil.which("powershell.exe") if sys.platform == "win32" else None
+    if kabuk:  # pragma: no cover - platforma bağlı
+        betik = _wait_then_run_script(os.getpid(), command)
+        kodlanmis = base64.b64encode(betik.encode("utf-16-le")).decode("ascii")
+        try:
+            return subprocess.Popen(  # noqa: S603
+                [kabuk, "-NoProfile", "-NonInteractive",
+                 "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+                 "-EncodedCommand", kodlanmis],
+                **kwargs,
+            )
+        except OSError:
+            pass            # PowerShell yok: doğrudan başlat
     return subprocess.Popen(command, **kwargs)  # noqa: S603
 
 

@@ -39,7 +39,12 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-CloseApplications=yes
+; "force": Restart Manager yanıt vermeyen süreçleri zaman aşımından sonra
+; sonlandırır. Zorunlu, çünkü XFA formu açıkken çalışan penceresiz
+; QtWebEngineProcess.exe süreci RM'nin WM_CLOSE'unu alamıyor; "yes" ile
+; kurulum "Some applications could not be shut down" deyip geri alınıyordu.
+; Ana pencere yine önce nazikçe kapatılır (kaydetme onayı çıkar).
+CloseApplications=force
 RestartApplications=no
 
 [Languages]

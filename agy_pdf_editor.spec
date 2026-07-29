@@ -121,13 +121,31 @@ a.binaries = [
     if not os.path.basename(entry[0]).startswith(_UNWANTED_DLL)
 ]
 
-# WebEngine'in geliştirici araçları kaynakları 83 MB tutuyor ve uygulamada
-# DevTools açılmıyor. Çıkarıldığında form görünümü aynı çalışıyor (paketlenmiş
-# exe ile doğrulandı).
-a.datas = [
-    entry for entry in a.datas
-    if "qtwebengine_devtools_resources" not in os.path.basename(entry[0])
-]
+# Pakete girmemesi gereken veri dosyaları.
+#
+# ``qml/`` ağacı en önemlisi: QtWebEngine'in QML sürümüne ait 2510 dosyalık
+# (24 MB) tema varlığı. Uygulama yalnızca **widget** sürümünü kullanıyor ve
+# klasör olmadan da sorunsuz çalışıyor (paketlenmiş exe ile doğrulandı).
+# Kaldırılması dosya sayısını 2971'den ~460'a düşürüyor: kurulum belirgin
+# biçimde hızlanıyor, virüs taramasının işi azalıyor ve derin kurulum
+# dizinlerinde MAX_PATH sınırını aşan yollar (``qml\QtQuick\Controls\
+# FluentWinUI3\...``) ortadan kalkıyor — bu yollar kurulumda
+# "MoveFile tamamlanamadı; kod 3" hatası veriyordu.
+#
+# DevTools kaynakları (83 MB) ve ``.debug`` çeşitleri de kullanılmıyor.
+def _gereksiz(entry) -> bool:
+    hedef = entry[0].replace("\\", "/")
+    ad = os.path.basename(hedef)
+    return (
+        "/PySide6/qml/" in f"/{hedef}"
+        or "qtwebengine_devtools_resources" in ad
+        or ".debug.pak" in ad
+        or ".debug.bin" in ad
+    )
+
+
+a.datas = [entry for entry in a.datas if not _gereksiz(entry)]
+a.binaries = [entry for entry in a.binaries if not _gereksiz(entry)]
 
 pyz = PYZ(a.pure)
 
