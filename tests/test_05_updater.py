@@ -31,7 +31,19 @@ MANIFEST = {
     "release_notes": "- Canlı metin düzenleyici\n- Hata düzeltmeleri",
     "release_date": "2026-08-01",
     "size": 1024,
+    # Gerçek yayınlarda bu alan her zaman doludur; servis eksik özeti
+    # reddettiği için fikstür de gerçeğe uygun olmalı.
+    "sha256": "ab" * 32,
 }
+
+
+def manifest_icin(veri: bytes, **degisiklikler) -> dict:
+    """``veri`` indirilecekmiş gibi doğru sha256 taşıyan manifest üretir.
+
+    Servis sha256'sız manifesti reddettiği için indirme testlerinin de
+    gerçek yayınlardaki gibi tutarlı bir özet taşıması gerekir.
+    """
+    return {**MANIFEST, "sha256": hashlib.sha256(veri).hexdigest(), **degisiklikler}
 
 
 class FakeResponse(io.BytesIO):
@@ -178,7 +190,7 @@ class TestIndirme:
     def test_dosya_indirilir_ve_ilerleme_bildirilir(self, fake_network, tmp_path):
         veri = b"MZ" + b"x" * 5000
         fake_network["payload"] = veri
-        info = UpdateInfo.from_dict(MANIFEST)
+        info = UpdateInfo.from_dict(manifest_icin(veri))
         hedef = str(tmp_path / "setup.exe")
 
         olaylar: list[tuple] = []
@@ -195,7 +207,7 @@ class TestIndirme:
 
     def test_yarim_kalan_dosya_birakilmaz(self, fake_network, tmp_path):
         fake_network["payload"] = b"veri"
-        info = UpdateInfo.from_dict(MANIFEST)
+        info = UpdateInfo.from_dict(manifest_icin(b"veri"))
         hedef = str(tmp_path / "setup.exe")
         download_to(info, hedef)
         assert not os.path.exists(hedef + ".part"), ".part dosyası temizlenmeli"
@@ -223,7 +235,7 @@ class TestIndirme:
     def test_boyut_bildirilmezse_cokmez(self, fake_network, tmp_path):
         fake_network["payload"] = b"veri"
         fake_network["headers"] = {}
-        info = UpdateInfo.from_dict({**MANIFEST, "size": 0})
+        info = UpdateInfo.from_dict(manifest_icin(b"veri", size=0))
         olaylar: list[tuple] = []
         download_to(info, str(tmp_path / "s.exe"), on_progress=lambda *a: olaylar.append(a))
         assert olaylar[-1][1] >= 0
@@ -258,6 +270,54 @@ class TestUpdaterService:
         assert self._bekle(qapp, lambda: bool(sonuc))
         assert sonuc[0] == "9.9.9"
 
+    def test_sha256siz_manifest_reddedilir(self, qapp, fake_network, make_service):
+        """Bayat önbellek ya da yarım yayın sha256'sız manifest üretebilir.
+
+        Böyle bir manifest kabul edilirse ``download_to`` bütünlük kontrolünü
+        atlar ve doğrulanmamış bir kurulum dosyası çalıştırılır.
+        """
+        fake_network["payload"] = json.dumps({**MANIFEST, "sha256": ""}).encode()
+        servis = make_service("https://x/version.json", current_version="1.0.0")
+        hatalar: list = []
+        bulunan: list = []
+        servis.checkFailed.connect(hatalar.append)
+        servis.updateAvailable.connect(bulunan.append)
+
+        servis.check_for_updates()
+        assert self._bekle(qapp, lambda: bool(hatalar)), "checkFailed gelmeli"
+        assert "sha256" in hatalar[0]
+        assert not bulunan, "sha256'sız manifest güncelleme olarak sunulmamalı"
+
+    def test_bozuk_uzunlukta_sha256_reddedilir(self, qapp, fake_network, make_service):
+        fake_network["payload"] = json.dumps({**MANIFEST, "sha256": "abc123"}).encode()
+        servis = make_service("https://x/version.json", current_version="1.0.0")
+        hatalar: list = []
+        servis.checkFailed.connect(hatalar.append)
+        servis.check_for_updates()
+        assert self._bekle(qapp, lambda: bool(hatalar))
+        assert "sha256" in hatalar[0]
+
+    def test_checksum_zorunlulugu_kapatilabilir(self, qapp, fake_network, make_service):
+        fake_network["payload"] = json.dumps({**MANIFEST, "sha256": ""}).encode()
+        servis = make_service(
+            "https://x/version.json", current_version="1.0.0", require_checksum=False
+        )
+        bulunan: list = []
+        servis.updateAvailable.connect(bulunan.append)
+        servis.check_for_updates()
+        assert self._bekle(qapp, lambda: bool(bulunan))
+        assert bulunan[0].version == "2.5.0"
+
+    def test_sha256siz_manifest_indirilemez(self, qapp, fake_network, make_service):
+        """Kontrolü aşsa bile indirme aşaması ikinci kez doğrular."""
+        servis = make_service("https://x/version.json", current_version="1.0.0")
+        hatalar: list = []
+        servis.downloadFailed.connect(hatalar.append)
+
+        bilgi = UpdateInfo.from_dict({**MANIFEST, "sha256": ""})
+        assert servis.download(bilgi) is False
+        assert hatalar and "sha256" in hatalar[0]
+
     def test_ag_hatasi_gui_yi_cokertmez(self, qapp, fake_network, make_service):
         fake_network["error"] = urllib.error.URLError("ağ yok")
         servis = make_service("https://x/version.json")
@@ -290,14 +350,15 @@ class TestUpdaterService:
         assert self._bekle(qapp, lambda: bool(bulunan))
 
     def test_indirme_ucdan_uca_calisir(self, qapp, fake_network, temp_downloads, make_service):
-        fake_network["payload"] = b"MZ" + b"k" * 2048
+        veri = b"MZ" + b"k" * 2048
+        fake_network["payload"] = veri
         servis = make_service("https://x/version.json", current_version="1.0.0")
         biten: list = []
         ilerleme: list = []
         servis.downloadFinished.connect(biten.append)
         servis.downloadProgress.connect(lambda *a: ilerleme.append(a))
 
-        info = UpdateInfo.from_dict(MANIFEST)
+        info = UpdateInfo.from_dict(manifest_icin(veri))
         assert servis.download(info) is True
         assert self._bekle(qapp, lambda: bool(biten)), "downloadFinished gelmeli"
         assert os.path.isfile(biten[0])
@@ -556,7 +617,8 @@ class TestUctanUcaAkis:
         """Kullanıcı "Şimdi Güncelle" derse dosya inip kurulum tetiklenmeli."""
         from PySide6.QtCore import QDeadlineTimer
 
-        fake_network["payload"] = b"MZ" + b"kurulum" * 500
+        kurulum_verisi = b"MZ" + b"kurulum" * 500
+        fake_network["payload"] = kurulum_verisi
 
         # 1) Bildirim diyaloğu "Şimdi Güncelle" ile onaylanmış gibi davransın
         class Onaylayan(_SahteDiyalog):
@@ -578,7 +640,7 @@ class TestUctanUcaAkis:
 
         window._updater = None
         window.settings.update_skipped_version = ""
-        window._on_update_available(UpdateInfo.from_dict(MANIFEST))
+        window._on_update_available(UpdateInfo.from_dict(manifest_icin(kurulum_verisi)))
 
         son = QDeadlineTimer(5000)
         while not son.hasExpired() and not baslatilan:

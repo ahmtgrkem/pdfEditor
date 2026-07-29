@@ -245,19 +245,54 @@ Invoke-Native "git" @("commit", "-m", "Yayin: v$AppVersion") "Commit oluşturula
 Invoke-Native "git" @("push", "origin", $Branch) "version.json pushlanamadı."
 
 Write-Step "Yayın doğrulanıyor"
-Write-Host "raw.githubusercontent.com birkaç dakika önbellekler; sabırlı olun." -ForegroundColor DarkGray
+
+# Depodaki asıl içerik: API, raw.githubusercontent gibi CDN'de önbeklenmez.
 try {
-    $canli = (Invoke-WebRequest -Uri $FeedUrl -UseBasicParsing -TimeoutSec 30).Content |
-        ConvertFrom-Json
-    if ($canli.version -ne $AppVersion) {
-        Write-Warning "Yayındaki sürüm hâlâ $($canli.version) görünüyor (önbellek). 5 dk sonra tekrar bakın."
+    $depoda = Invoke-RestMethod "https://api.github.com/repos/$Repo/contents/version.json?ref=$Branch" `
+        -Headers @{ Accept = "application/vnd.github.raw" } -TimeoutSec 30 | ConvertFrom-Json
+    if ($depoda.sha256 -eq $Manifest.sha256) {
+        Write-Host "Depodaki manifest dogru (sha256 eslesti)." -ForegroundColor Green
     }
     else {
-        Write-Host "Yayında: v$($canli.version)" -ForegroundColor Green
+        throw "Depodaki sha256 ($($depoda.sha256)) beklenenden farkli ($($Manifest.sha256))."
     }
 }
 catch {
-    Write-Warning "Manifest doğrulanamadı: $($_.Exception.Message)"
+    Write-Warning "Depo icerigi dogrulanamadi: $($_.Exception.Message)"
+}
+
+# Kullanıcıların gerçekten gördüğü adres. DİKKAT: yalnızca "version" alanına
+# bakmak yetmez — bayat önbellek de aynı sürüm numarasını taşıyabilir ve
+# yayın başarılı sanılır. Ayırt edici alan sha256'dır.
+Write-Host "raw.githubusercontent.com onbellegi bekleniyor (en fazla 5 dk)..." -ForegroundColor DarkGray
+$tazelendi = $false
+foreach ($deneme in 1..10) {
+    try {
+        $canli = (Invoke-WebRequest -Uri $FeedUrl -UseBasicParsing -TimeoutSec 30).Content |
+            ConvertFrom-Json
+        if ($canli.sha256 -eq $Manifest.sha256) {
+            Write-Host "Feed guncel: v$($canli.version) (sha256 eslesti, $deneme. deneme)" -ForegroundColor Green
+            $tazelendi = $true
+            break
+        }
+        Write-Host "  $deneme/10 - hala bayat (sha256: '$($canli.sha256)')" -ForegroundColor DarkGray
+    }
+    catch {
+        Write-Host "  $deneme/10 - okunamadi: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+    if ($deneme -lt 10) { Start-Sleep -Seconds 30 }
+}
+
+if (-not $tazelendi) {
+    Write-Warning @"
+Feed hala bayat icerik donduruyor.
+
+Depodaki dosya dogru; sorun raw.githubusercontent.com onbelleginde. Genelde
+birkac dakika icinde kendiliginden duzelir. Kullanicilar bu sure boyunca
+guncellemeyi gormez - veri kaybi ya da bozuk kurulum riski yoktur.
+
+Kontrol:  curl -s $FeedUrl
+"@
 }
 
 Write-Host ""

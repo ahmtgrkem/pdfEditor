@@ -349,11 +349,13 @@ class UpdaterService(QObject):
         current_version: str = __version__,
         parent: QObject | None = None,
         require_https: bool = True,
+        require_checksum: bool = True,
     ) -> None:
         super().__init__(parent)
         self.feed_url = feed_url
         self.current_version = current_version
         self.require_https = require_https
+        self.require_checksum = require_checksum
         self._check_worker: _CheckWorker | None = None
         self._download_worker: _DownloadWorker | None = None
         self._silent = False
@@ -423,7 +425,7 @@ class UpdaterService(QObject):
     def _on_manifest(self, info: UpdateInfo) -> None:
         self._check_worker = None
         try:
-            self._validate_url(info.download_url)
+            self._validate_manifest(info)
         except ValueError as exc:
             self.checkFailed.emit(str(exc))
             return
@@ -442,13 +444,28 @@ class UpdaterService(QObject):
                 "Güvenlik nedeniyle kurulum dosyası yalnızca https adresinden indirilir."
             )
 
+    def _validate_manifest(self, info: UpdateInfo) -> None:
+        """Manifesti kabul etmeden önce güvenlik alanlarını doğrular.
+
+        ``sha256`` boşsa :func:`download_to` bütünlük kontrolünü tamamen
+        atlar ve doğrulanmamış bir kurulum dosyası çalıştırılır. Bayat
+        önbellek ya da yarım yayın böyle bir manifest üretebildiği için
+        eksik özet, sessizce geçilmek yerine hata sayılır.
+        """
+        self._validate_url(info.download_url)
+        if self.require_checksum and len(info.sha256) != 64:
+            raise ValueError(
+                "Sürüm dosyasında geçerli bir sha256 özeti yok; indirilen kurulum "
+                "doğrulanamayacağı için güncelleme iptal edildi."
+            )
+
     # -- 2) indirme ----------------------------------------------------
     def download(self, info: UpdateInfo) -> bool:
         """Kurulum dosyasını ``%TEMP%`` altına indirmeye başlar."""
         if self.downloading:
             return False
         try:
-            self._validate_url(info.download_url)
+            self._validate_manifest(info)
         except ValueError as exc:
             self.downloadFailed.emit(str(exc))
             return False
