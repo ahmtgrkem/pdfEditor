@@ -28,7 +28,8 @@ uygulaması. Python 3.10+, PySide6 (Qt 6) ve PyMuPDF üzerine kurulu; temiz katm
   biçim çubuğu, sol taşıma (`⋮⋮`) ve sağ genişlik (`⇹`) tutamakları. Ekranda
   görülen konum ve punto, PDF'e işlenenle birebir aynıdır (bkz.
   [Canlı metin düzenleyici](#canlı-metin-düzenleyici-hizalama-sözleşmesi))
-- Mevcut metne çift tıklayarak yerinde düzenleme (satır kaymadan)
+- Mevcut metne çift tıklayarak yerinde düzenleme (satır kaymadan; metnin
+  ardındaki zemin — desen, logo, renkli arka plan — korunur)
 - Metin kutusu ekleme (yazı tipi, boyut, renk, kalın/italik, hizalama; tam Türkçe karakter desteği)
 - Vurgulama, altını çizme, üstünü çizme
 - Serbest çizim (kalem) ve silgi
@@ -173,9 +174,10 @@ dışında hemen hiçbir görüntüleyici (MuPDF, Chrome, Edge, Preview) bu şab
 
 Uygulama iki yol sunar.
 
-### 1. Formu görüntüle (önerilen)
+### 1. Formu görüntüle (varsayılan)
 
-*Araçlar ▸ Formu görüntüle (XFA)* — dosya açılırken de teklif edilir.
+XFA belgesi açıldığında form **kendiliğinden** çizilir; soru sorulmaz.
+Yeniden üretmek için *Araçlar ▸ Formu görüntüle (XFA)*.
 
 Şablondaki yerleşim hesaplanır, metin/çizgi/görseller sayfaya işlenir ve
 alanlar gerçek **AcroForm widget'ları** olarak eklenir. Sonuç, **her
@@ -194,6 +196,7 @@ Adobe/Foxit'teki görünümünü hedefler:
 | `margin` iç boşlukları | Bitişik alanlar birbirine yapışmaz |
 | `imageEdit` alanları | Değerlerindeki görsel çizilir (logo, bayrak) |
 | Altbilgi `xfa:embed` | `Page <n> of <m>` sayaçları yerine konur |
+| Onay kutusu / radyo | Çerçeveli çizilir; kenarlıksız kutu tıklanabilir görünmez |
 
 Üretilen belge **adsız** açılır — diskteki dosyanın karşılığı olmadığı için
 "Kaydet" özgün XFA dosyasının üzerine yazmaz, "Farklı Kaydet" sorar.

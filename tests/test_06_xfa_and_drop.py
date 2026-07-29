@@ -562,17 +562,34 @@ class TestXfaCizim:
 
 
 class TestXfaArayuz:
-    def test_xfa_acilinca_menu_etkinlesir(self, qapp, window, xfa_pdf, monkeypatch):
-        monkeypatch.setattr(
-            "PySide6.QtWidgets.QMessageBox.information",
-            staticmethod(lambda *a, **k: None),
-        )
-        assert window._actions["xfa_form"].isEnabled() is False
+    def test_xfa_acilinca_form_kendiliginden_cizilir(self, qapp, window, xfa_pdf):
+        """Kullanıcıya soru sorulmaz: dosya açılır ve form görünür olur.
+
+        Önceden modal bir kutu çıkıyor, dosyayı görebilmek için önce ona
+        cevap vermek gerekiyordu.
+        """
+        assert window._actions["xfa_render"].isEnabled() is False
+        window.open_path(str(xfa_pdf))
+        qapp.processEvents()          # otomatik çizim kuyruğa alınır
+        qapp.processEvents()
+
+        ham = window.controller.document.raw
+        assert xfa.is_xfa(ham) is False, "form çizilmiş olmalı"
+        assert ham.is_form_pdf, "alanlar doldurulabilir olmalı"
+        # Kaynak saklandığı için diğer görünüme geçilebilir.
+        assert window._xfa_source is not None
+        assert window._actions["xfa_render_all"].isEnabled() is True
+
+    def test_cizilen_formda_tum_doldurulabilir_alanlar_bulunur(
+        self, qapp, window, xfa_pdf
+    ):
         window.open_path(str(xfa_pdf))
         qapp.processEvents()
-        assert window._actions["xfa_form"].isEnabled() is True
-        assert window._xfa_form is not None
-        assert len(window._xfa_form.editable_fields) == 3
+        qapp.processEvents()
+        adlar = {w.field_name for s in window.controller.document.raw
+                 for w in s.widgets()}
+        assert len(adlar) == 3          # düğme doldurulabilir sayılmaz
+        assert {a.rsplit(".", 1)[-1] for a in adlar} == {"ad", "ulke", "onay"}
 
     def test_duz_pdf_acilinca_menu_kapali_kalir(self, qapp, window, sample_pdf):
         window.open_path(str(sample_pdf))

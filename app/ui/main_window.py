@@ -97,6 +97,10 @@ class MainWindow(QMainWindow):
         self._updater: UpdaterService | None = None
         #: Açık belgedeki XFA formu (yoksa None)
         self._xfa_form = None
+        #: Çizilen formun kaynağı: (şablon, değerler). Çizim belgeyi
+        #: değiştirdiği için XFA artık açık belgede bulunmaz; alternatif
+        #: görünüme (tüm bölümler) geçebilmek için kaynak burada saklanır.
+        self._xfa_source: tuple[bytes, dict] | None = None
         self._update_progress = None
         self._quitting_for_update = False
 
@@ -643,6 +647,10 @@ class MainWindow(QMainWindow):
         if path:
             self.settings.add_recent(path)
             self.settings.last_directory = os.path.dirname(path)
+            # Diskten yeni bir dosya açıldı; önceki formun kaynağı geçersiz.
+            # (Çizim sonucu adsız açılır, yani ``path`` boştur ve kaynak
+            # korunur — böylece diğer görünüme geçilebilir.)
+            self._xfa_source = None
         self._update_page_widgets()
         self._update_actions()
         self._update_title()
@@ -661,6 +669,7 @@ class MainWindow(QMainWindow):
         self._update_title()
         self.info_label.setText("")
         self._xfa_form = None
+        self._xfa_source = None
         self._actions["xfa_form"].setEnabled(False)
         self._actions["xfa_render"].setEnabled(False)
         self._actions["xfa_render_all"].setEnabled(False)
@@ -692,97 +701,102 @@ class MainWindow(QMainWindow):
         return xfa.load(ham)
 
     def _check_xfa_form(self) -> None:
-        """Dinamik XFA açıldığında kullanıcıyı bilgilendirir.
+        """Dinamik XFA açıldığında formu doğrudan görüntülenebilir hâle getirir.
 
-        Bu belgelerde sayfa akışında yalnızca "Adobe Reader gerekli" uyarısı
-        bulunur; hiçbir şey söylenmezse kullanıcı uygulamanın dosyayı
-        açamadığını sanır.
+        Kullanıcıyı modal bir kutuyla karşılamak yerine — Foxit/Adobe da öyle
+        yapar — form sessizce çizilir ve durum çubuğunda bilgilendirilir.
+        Aksi hâlde kullanıcı, dosyayı açmak için önce bir soruya cevap vermek
+        zorunda kalıyordu.
         """
         self._xfa_form = self.current_xfa_form()
         var = self._xfa_form is not None and bool(self._xfa_form.editable_fields)
         self._actions["xfa_form"].setEnabled(var)
-        self._actions["xfa_render"].setEnabled(var)
-        self._actions["xfa_render_all"].setEnabled(var)
+        # Çizim sonrası açık belgede XFA kalmaz; kaynak saklandığı sürece
+        # diğer görünüme geçilebilmelidir.
+        cizilebilir = var or self._xfa_source is not None
+        self._actions["xfa_render"].setEnabled(cizilebilir)
+        self._actions["xfa_render_all"].setEnabled(cizilebilir)
         if not var or not self._xfa_form.dynamic:
             return
 
-        sayi = len(self._xfa_form.editable_fields)
-        self.show_message(
-            f"Bu bir etkileşimli XFA formu — {sayi} alan bulundu. "
-            "Araçlar ▸ Formu görüntüle."
-        )
+        # Çizim bir sonraki olay döngüsüne bırakılır: belge açma sinyalleri
+        # daha akıp bitmeden belgeyi değiştirmek panelleri tutarsız bırakır.
+        QTimer.singleShot(0, self._auto_render_xfa)
 
-        kutu = QMessageBox(self)
-        kutu.setWindowTitle("Etkileşimli form")
-        kutu.setIcon(QMessageBox.Information)
-        kutu.setTextFormat(Qt.RichText)
-        kutu.setText(
-            "<h3>Bu belge bir XFA formu</h3>"
-            "<p>Form içeriği sayfaya değil, belgeye gömülü bir XML şablonuna "
-            "kayıtlıdır; bu yüzden sayfada yalnızca Adobe uyarısı görünür. "
-            "Bu, dosyanın bozuk olduğu anlamına gelmez.</p>"
-            f"<p><b>{sayi} doldurulabilir alan</b> okundu. Formu görüntülenebilir "
-            "ve doldurulabilir bir PDF'e dönüştürebilirim.</p>"
-            "<p><i>Tüm bölümleriyle</i>, özgün belgede yalnızca seçime göre "
-            "açılan bölümleri de çizer.</p>"
+    def _auto_render_xfa(self) -> None:
+        sayi = len(self._xfa_form.editable_fields) if self._xfa_form else 0
+        if not self.render_xfa_form(silent=True):
+            self.show_message(
+                f"Etkileşimli XFA formu — {sayi} alan bulundu. "
+                "Araçlar ▸ Formu görüntüle."
+            )
+            return
+        self.show_message(
+            f"Etkileşimli XFA formu görüntülenebilir hâle getirildi "
+            f"({sayi} alan). Tümü için: Araçlar ▸ Formu tüm bölümleriyle görüntüle."
         )
-        btn_goruntule = kutu.addButton("Formu Görüntüle", QMessageBox.AcceptRole)
-        btn_tumu = kutu.addButton("Tüm Bölümleriyle", QMessageBox.AcceptRole)
-        kutu.addButton("Şimdilik Kalsın", QMessageBox.RejectRole)
-        kutu.setDefaultButton(btn_goruntule)
-        kutu.exec()
-        if kutu.clickedButton() is btn_goruntule:
-            self.render_xfa_form()
-        elif kutu.clickedButton() is btn_tumu:
-            self.render_xfa_form(show_hidden=True)
 
     def render_xfa_form_all(self) -> None:
         """Betikle açılan bölümler dâhil, formun tamamını çizer."""
         self.render_xfa_form(show_hidden=True)
 
-    def render_xfa_form(self, show_hidden: bool = False) -> None:
+    def render_xfa_form(self, show_hidden: bool = False,
+                        silent: bool = False) -> bool:
         """XFA şablonunu çizip görüntülenebilir bir belge olarak açar.
 
         ``show_hidden`` özgün görünümden ayrılır: Adobe/Foxit'te yalnızca
         seçime göre açılan bölümler de çizilir, böylece form tek seferde
-        doldurulabilir.
+        doldurulabilir. ``silent`` otomatik açılış içindir: başarısızlıkta
+        uyarı kutusu gösterilmez, ``False`` döner.
         """
         form = self.current_xfa_form()
-        if form is None:
-            QMessageBox.information(
-                self, "Formu görüntüle",
-                "Bu belgede XFA formu bulunamadı.",
+        if form is not None:
+            paketler = xfa.read_packets(self.controller.document.raw)
+            if "template" not in paketler:
+                return False
+            sablon = xfa.packet_data(
+                self.controller.document.raw, paketler["template"]
             )
-            return
-
-        paketler = xfa.read_packets(self.controller.document.raw)
-        sablon = xfa.packet_data(self.controller.document.raw, paketler["template"])
+            degerler = form.as_values()
+        elif self._xfa_source is not None:
+            # Belge zaten çizilmiş; kaynak şablondan diğer görünüm üretilir.
+            sablon, degerler = self._xfa_source
+        else:
+            if not silent:
+                QMessageBox.information(
+                    self, "Formu görüntüle",
+                    "Bu belgede XFA formu bulunamadı.",
+                )
+            return False
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             veri = xfa_render.render_bytes(
-                sablon, form.as_values(), show_hidden=show_hidden
+                sablon, degerler, show_hidden=show_hidden
             )
         except Exception as exc:  # noqa: BLE001 - olağandışı şablon
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(
-                self, "Formu görüntüle",
-                f"Form çizilemedi:\n{exc}\n\n"
-                "Alanları yine de Araçlar ▸ Etkileşimli formu doldur… "
-                "ile doldurabilirsiniz.",
-            )
-            return
+            if not silent:
+                QMessageBox.warning(
+                    self, "Formu görüntüle",
+                    f"Form çizilemedi:\n{exc}\n\n"
+                    "Alanları yine de Araçlar ▸ Etkileşimli formu doldur… "
+                    "ile doldurabilirsiniz.",
+                )
+            return False
         finally:
             if QApplication.overrideCursor() is not None:
                 QApplication.restoreOverrideCursor()
 
         kaynak = self.controller.document.display_name
+        self._xfa_source = (sablon, degerler)
         self.controller.open_bytes(veri)
-        kapsam = "tüm bölümleriyle " if show_hidden else ""
-        self.show_message(
-            f"{kaynak} formu {kapsam}görüntülenebilir PDF'e dönüştürüldü. "
-            "Alanları doldurup 'Farklı Kaydet' ile kaydedebilirsiniz."
-        )
+        if not silent:
+            kapsam = "tüm bölümleriyle " if show_hidden else ""
+            self.show_message(
+                f"{kaynak} formu {kapsam}görüntülenebilir PDF'e dönüştürüldü. "
+                "Alanları doldurup 'Farklı Kaydet' ile kaydedebilirsiniz."
+            )
+        return True
 
     def xfa_form_dialog(self) -> None:
         from .dialogs import XfaFormDialog

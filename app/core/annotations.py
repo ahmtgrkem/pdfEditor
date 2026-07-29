@@ -419,8 +419,18 @@ def replace_text(
 
         # Orijinal metni kalıntısız silmek için 0.5pt tampon genişletme
         clean_rect = Rect(pdf_rect.x0 - 0.5, pdf_rect.y0 - 0.5, pdf_rect.x1 + 0.5, pdf_rect.y1 + 0.5)
-        page.add_redact_annot(clean_rect, fill=(1, 1, 1))
-        page.apply_redactions()
+        # ``fill`` verilmez: dolgu, alanı düz bir dikdörtgenle boyar ve
+        # metnin altındaki arka planı (desen, logo, renkli zemin) yok eder —
+        # kullanıcı düzenlemeye girer girmez metnin ardında beyaz bir kutu
+        # belirir. Yalnızca metin kaldırılır; görseller ve çizimler korunur.
+        page.add_redact_annot(clean_rect, fill=False)
+        try:
+            page.apply_redactions(
+                images=fitz.PDF_REDACT_IMAGE_NONE,
+                graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            )
+        except (AttributeError, TypeError):   # eski PyMuPDF sürümleri
+            page.apply_redactions()
 
     return add_text(
         doc, page_index, visual_rect, new_text, style,

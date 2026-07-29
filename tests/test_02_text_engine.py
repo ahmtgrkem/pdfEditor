@@ -169,6 +169,46 @@ class TestMetinMotoru:
         pump(qapp)
         assert getattr(view, "inline_editor", None) is not None
 
+    def test_metin_degistirmek_arka_plani_silmez(self, opened, qapp, tmp_path):
+        """Düzenlenen metnin ardındaki zemin korunmalı.
+
+        Eski davranışta silme işlemi alanı beyaz dolguyla boyuyordu; desenli
+        ya da renkli bir zemin üzerindeki metni düzenlemeye girer girmez
+        metnin ardında beyaz bir kutu beliriyordu.
+        """
+        import pymupdf
+
+        # Renkli zemin üzerine metin
+        d = pymupdf.open()
+        s = d.new_page(width=300, height=200)
+        s.draw_rect(pymupdf.Rect(0, 0, 300, 200), color=None, fill=(0.2, 0.4, 0.9))
+        s.insert_text(pymupdf.Point(40, 100), "Eski metin", fontsize=18)
+        kaynak = tmp_path / "zeminli.pdf"
+        d.save(str(kaynak))
+        d.close()
+
+        opened.controller.open(str(kaynak))
+        pump(qapp)
+        assert opened.controller.replace_text(
+            0, (35.0, 82.0, 200.0, 108.0), "Yeni metin", TextStyle(size=18.0)
+        ) is True
+        pump(qapp)
+
+        sayfa = opened.controller.document.raw[0]
+        metin = sayfa.get_text().replace("\xa0", " ")   # NBSP olarak çizilebilir
+        assert "Yeni metin" in metin
+        assert "Eski metin" not in metin
+
+        # Metnin bulunduğu bölgede beyaz kalmamalı: zemin görünür olmalı.
+        pix = sayfa.get_pixmap(dpi=72, clip=pymupdf.Rect(35, 82, 200, 108))
+        beyaz = sum(
+            1 for i in range(0, len(pix.samples), pix.n)
+            if pix.samples[i] > 250 and pix.samples[i + 1] > 250
+            and pix.samples[i + 2] > 250
+        )
+        oran = beyaz / (pix.width * pix.height)
+        assert oran < 0.5, f"zemin beyazla örtülmüş (%{oran:.0%})"
+
     def test_zoom_degisimi_metin_duzenlemesini_bozmaz(self, opened, qapp):
         # 1. Metni düzenle (%147 zoom simülasyonu)
         opened.view.set_zoom(1.47)

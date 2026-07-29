@@ -784,10 +784,19 @@ def _add_widget(page, rect: fitz.Rect, node: ET.Element, path: str,
     w.rect = rect
     w.field_type = widget_turu
     w.field_name = path or (node.get("name") or "alan")
-    # Alanın kendi kenarlığı sayfaya çizildiği için widget'a ikinci bir
-    # çerçeve eklenmez; aksi hâlde alt çizgi stili kutuya dönüşür.
     w.fill_color = (0.93, 0.94, 0.99)
-    w.border_width = 0
+
+    if widget_turu in (fitz.PDF_WIDGET_TYPE_CHECKBOX,
+                       fitz.PDF_WIDGET_TYPE_RADIOBUTTON):
+        # Kenarlıksız bir onay kutusu/radyo yalnızca soluk bir leke gibi
+        # görünür; çerçeve olmadan tıklanabilir olduğu anlaşılmaz.
+        w.border_color = (0.45, 0.47, 0.55)
+        w.border_width = 0.8
+    else:
+        # Metin alanlarında kenarlık sayfaya ayrıca çizilir (çoğunlukla
+        # yalnızca alt kenar); widget da çerçeve çizerse alt çizgi stili
+        # kutuya dönüşür.
+        w.border_width = 0
 
     if widget_turu in (fitz.PDF_WIDGET_TYPE_CHECKBOX,
                        fitz.PDF_WIDGET_TYPE_RADIOBUTTON):
