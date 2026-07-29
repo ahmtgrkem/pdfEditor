@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QToolBar,
     QWidget,
@@ -59,6 +60,13 @@ from .tools import LABELS, Tool, ToolState
 
 IMAGE_FILTER = "Görseller (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)"
 PDF_FILTER = "PDF dosyaları (*.pdf)"
+#: Açma iletişimi: uzantısı bozuk/farklı dosyalar da seçilebilsin. Uygulama
+#: biçimi içeriğe bakarak çözer (bkz. ``app.core.document.open_tolerant``).
+OPEN_FILTER = (
+    "Belgeler (*.pdf *.xps *.oxps *.epub *.mobi *.fb2 *.cbz *.svg "
+    "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff);;"
+    "PDF dosyaları (*.pdf);;Tüm dosyalar (*)"
+)
 
 #: Araç çubuğundaki düzenleme araçları: (araç, simge, ipucu)
 TOOL_BUTTONS = [
@@ -110,7 +118,12 @@ class MainWindow(QMainWindow):
         self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks)
 
         self.view = PdfView(self.controller, self.tools, self)
-        self.setCentralWidget(self.view)
+        # Dinamik XFA formları sayfa akışında bulunmaz; kendi canlı görünümünde
+        # açılır (bkz. _open_xfa_live). İki görünüm burada takas edilir.
+        self.stack = QStackedWidget(self)
+        self.stack.addWidget(self.view)
+        self.setCentralWidget(self.stack)
+        self.xfa_view = None
         # Belge alanı sürükleme olaylarını kendi tükettiği için dosyayı
         # buradan alırız; aksi hâlde pencerenin ortasına bırakmak çalışmaz.
         self.view.filesDropped.connect(self.open_dropped_files)
@@ -208,9 +221,9 @@ class MainWindow(QMainWindow):
           self.clear_page_annotations)
 
         # -- görünüm ----------------------------------------------------
-        A("zoom_in", "Yakınlaştır", "zoom_in", QKeySequence.ZoomIn, self.view.zoom_in)
-        A("zoom_out", "Uzaklaştır", "zoom_out", QKeySequence.ZoomOut, self.view.zoom_out)
-        A("zoom_actual", "Gerçek boyut", "zoom_actual", "Ctrl+0", self.view.zoom_actual)
+        A("zoom_in", "Yakınlaştır", "zoom_in", QKeySequence.ZoomIn, self.zoom_in)
+        A("zoom_out", "Uzaklaştır", "zoom_out", QKeySequence.ZoomOut, self.zoom_out)
+        A("zoom_actual", "Gerçek boyut", "zoom_actual", "Ctrl+0", self.zoom_actual)
         A("fit_page", "Sayfaya sığdır", "fit_page", "Ctrl+9",
           lambda: self.view.set_zoom_mode(ZoomMode.FIT_PAGE))
         A("fit_width", "Genişliğe sığdır", "fit_width", "Ctrl+8",
@@ -233,10 +246,12 @@ class MainWindow(QMainWindow):
         A("theme", "Temayı değiştir", "theme_light", "Ctrl+T", self.toggle_theme)
 
         # -- gezinme ----------------------------------------------------
-        A("first", "İlk sayfa", "first", "Ctrl+Home", self.view.first_page)
-        A("prev", "Önceki sayfa", "prev", "PgUp", self.view.prev_page)
-        A("next", "Sonraki sayfa", "next", "PgDown", self.view.next_page)
-        A("last", "Son sayfa", "last", "Ctrl+End", self.view.last_page)
+        A("first", "İlk sayfa", "first", "Ctrl+Home",
+          lambda: self._page_step(first=True))
+        A("prev", "Önceki sayfa", "prev", "PgUp", lambda: self._page_step(-1))
+        A("next", "Sonraki sayfa", "next", "PgDown", lambda: self._page_step(1))
+        A("last", "Son sayfa", "last", "Ctrl+End",
+          lambda: self._page_step(last=True))
         A("goto", "Sayfaya git…", None, "Ctrl+G", self.goto_page_dialog)
 
         # -- sayfa işlemleri --------------------------------------------
@@ -259,6 +274,10 @@ class MainWindow(QMainWindow):
         A("split", "PDF'i böl…", "split", None, self.split_dialog)
         A("watermark", "Filigran ekle…", "watermark", None, self.watermark_dialog)
         # XFA yalnızca öyle bir form açıldığında etkinleşir (bkz. _check_xfa_form)
+        A("xfa_export", "Doldurulmuş formu PDF'e aktar…", "save", None,
+          self.export_xfa_pdf).setEnabled(False)
+        A("xfa_reload", "Formu baştan yükle", None, None,
+          self._open_xfa_live).setEnabled(False)
         A("xfa_render", "Formu görüntüle (XFA)", "text", None,
           self.render_xfa_form).setEnabled(False)
         A("xfa_render_all", "Formu tüm bölümleriyle görüntüle", "text", None,
@@ -373,6 +392,8 @@ class MainWindow(QMainWindow):
         m_tools.addSeparator()
         m_tools.addAction(a["watermark"])
         m_tools.addSeparator()
+        m_tools.addAction(a["xfa_export"])
+        m_tools.addAction(a["xfa_reload"])
         m_tools.addAction(a["xfa_render"])
         m_tools.addAction(a["xfa_render_all"])
         m_tools.addAction(a["xfa_form"])
@@ -623,6 +644,23 @@ class MainWindow(QMainWindow):
         for action in self.tool_actions.values():
             action.setEnabled(has_doc)
 
+        # Canlı XFA görünümünde sayfa/açıklama araçları anlamsızdır: belge
+        # akışı yalnızca "Adobe gerekli" uyarı sayfasından ibarettir, düzenleme
+        # onu değiştirir, formu değil.
+        canli = self.in_xfa_mode
+        self._actions["xfa_export"].setEnabled(canli)
+        self._actions["xfa_reload"].setEnabled(canli)
+        if canli:
+            for key in (
+                "clear_annots", "rotate_cw", "rotate_ccw", "rotate_all_cw",
+                "rotate_all_ccw", "page_add", "page_duplicate", "page_extract",
+                "page_delete", "watermark", "export_images", "export_text",
+                "compress", "copy", "find", "find_next", "find_prev",
+            ):
+                self._actions[key].setEnabled(False)
+            for action in self.tool_actions.values():
+                action.setEnabled(False)
+
         undo_label = self.controller.history.undo_label
         redo_label = self.controller.history.redo_label
         self._actions["undo"].setText(
@@ -633,6 +671,10 @@ class MainWindow(QMainWindow):
         )
 
     def _update_page_widgets(self) -> None:
+        # Canlı XFA'da sayfa sayısı belgeden değil, formun o anki
+        # yerleşiminden gelir (bkz. _on_xfa_pages).
+        if self.in_xfa_mode:
+            return
         pages = self.controller.page_count
         self._syncing = True
         try:
@@ -655,15 +697,20 @@ class MainWindow(QMainWindow):
         self._update_actions()
         self._update_title()
         self._update_info_label()
+        onarildi = self.controller.document.was_repaired
         self.show_message(
             f"{self.controller.document.display_name} açıldı "
             f"({self.controller.page_count} sayfa)."
+            + (" Dosya bozuktu ya da PDF değildi; onarılarak açıldı — "
+               "değişiklikleri 'Farklı Kaydet' ile saklayın."
+               if onarildi else "")
         )
         # XFA kontrolü en sonda: uyarı diyaloğu açılışta gösterilir ve
         # yukarıdaki durum mesajının üstüne yazar.
         self._check_xfa_form()
 
     def _on_document_closed(self) -> None:
+        self._leave_xfa_live()
         self._update_page_widgets()
         self._update_actions()
         self._update_title()
@@ -701,40 +748,180 @@ class MainWindow(QMainWindow):
         return xfa.load(ham)
 
     def _check_xfa_form(self) -> None:
-        """Dinamik XFA açıldığında formu doğrudan görüntülenebilir hâle getirir.
+        """Dinamik XFA açıldığında formu canlı görünümde açar.
 
         Kullanıcıyı modal bir kutuyla karşılamak yerine — Foxit/Adobe da öyle
-        yapar — form sessizce çizilir ve durum çubuğunda bilgilendirilir.
-        Aksi hâlde kullanıcı, dosyayı açmak için önce bir soruya cevap vermek
-        zorunda kalıyordu.
+        yapar — form sessizce açılır ve durum çubuğunda bilgilendirilir.
         """
         self._xfa_form = self.current_xfa_form()
         var = self._xfa_form is not None and bool(self._xfa_form.editable_fields)
         self._actions["xfa_form"].setEnabled(var)
-        # Çizim sonrası açık belgede XFA kalmaz; kaynak saklandığı sürece
-        # diğer görünüme geçilebilmelidir.
+        # Statik çizim sonrası açık belgede XFA kalmaz; kaynak saklandığı
+        # sürece diğer görünüme geçilebilmelidir.
         cizilebilir = var or self._xfa_source is not None
         self._actions["xfa_render"].setEnabled(cizilebilir)
         self._actions["xfa_render_all"].setEnabled(cizilebilir)
         if not var or not self._xfa_form.dynamic:
+            self._leave_xfa_live()
             return
 
-        # Çizim bir sonraki olay döngüsüne bırakılır: belge açma sinyalleri
-        # daha akıp bitmeden belgeyi değiştirmek panelleri tutarsız bırakır.
-        QTimer.singleShot(0, self._auto_render_xfa)
+        # Açılış bir sonraki olay döngüsüne bırakılır: belge açma sinyalleri
+        # daha akıp bitmeden görünümü değiştirmek panelleri tutarsız bırakır.
+        QTimer.singleShot(0, self._open_xfa_live)
 
-    def _auto_render_xfa(self) -> None:
-        sayi = len(self._xfa_form.editable_fields) if self._xfa_form else 0
-        if not self.render_xfa_form(silent=True):
-            self.show_message(
-                f"Etkileşimli XFA formu — {sayi} alan bulundu. "
-                "Araçlar ▸ Formu görüntüle."
-            )
+    # -- canlı (etkileşimli) görünüm ------------------------------------
+    @property
+    def in_xfa_mode(self) -> bool:
+        return self.xfa_view is not None and self.stack.currentWidget() is self.xfa_view
+
+    def _open_xfa_live(self) -> None:
+        """Şablonu derleyip etkileşimli görünümde gösterir."""
+        if not self.controller.is_open:
             return
-        self.show_message(
-            f"Etkileşimli XFA formu görüntülenebilir hâle getirildi "
-            f"({sayi} alan). Tümü için: Araçlar ▸ Formu tüm bölümleriyle görüntüle."
+        ham = self.controller.document.raw
+        paketler = xfa.read_packets(ham)
+        if "template" not in paketler:
+            return
+        sablon = xfa.packet_data(ham, paketler["template"])
+        if not sablon:
+            return
+        degerler = xfa.read_values(
+            xfa.packet_data(ham, paketler["datasets"])
+            if "datasets" in paketler else b""
         )
+
+        if self.xfa_view is None:
+            try:
+                from .xfa_view import XfaFormView
+            except ImportError as exc:      # QtWebEngine kurulu değil
+                self.show_message(
+                    f"Etkileşimli form görünümü kullanılamıyor ({exc}); "
+                    "Araçlar ▸ Formu görüntüle ile statik çizime düşebilirsiniz."
+                )
+                return
+            self.xfa_view = XfaFormView(self)
+            self.xfa_view.status.connect(self.show_message)
+            self.xfa_view.contentChanged.connect(self._on_xfa_edited)
+            self.xfa_view.pageCountChanged.connect(self._on_xfa_pages)
+            self.xfa_view.formReady.connect(self._on_xfa_ready)
+            self.xfa_view.host.printRequested.connect(self.export_xfa_pdf)
+            self.stack.addWidget(self.xfa_view)
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.xfa_view.load_template(sablon, degerler)
+        except Exception as exc:  # noqa: BLE001 - olağandışı şablon
+            self.show_message(f"Form derlenemedi: {exc}")
+            return
+        finally:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+
+        self._xfa_source = (sablon, degerler)
+        self.stack.setCurrentWidget(self.xfa_view)
+        self._update_actions()
+
+    def _leave_xfa_live(self) -> None:
+        if self.in_xfa_mode:
+            self.stack.setCurrentWidget(self.view)
+            self._update_actions()
+
+    # -- görünüm komutlarının yönlendirilmesi ---------------------------
+    def zoom_in(self) -> None:
+        (self.xfa_view if self.in_xfa_mode else self.view).zoom_in()
+
+    def zoom_out(self) -> None:
+        (self.xfa_view if self.in_xfa_mode else self.view).zoom_out()
+
+    def zoom_actual(self) -> None:
+        (self.xfa_view if self.in_xfa_mode else self.view).zoom_actual()
+
+    def _page_step(self, delta: int = 0, first: bool = False,
+                   last: bool = False) -> None:
+        if not self.in_xfa_mode:
+            if first:
+                self.view.first_page()
+            elif last:
+                self.view.last_page()
+            elif delta < 0:
+                self.view.prev_page()
+            else:
+                self.view.next_page()
+            return
+        toplam = self.xfa_view.page_count
+        simdiki = self.page_spin.value() or 1
+        hedef = 1 if first else toplam if last else simdiki + delta
+        hedef = max(1, min(hedef, toplam))
+        self.page_spin.setValue(hedef)
+        self.xfa_view.go_to_page(hedef - 1)
+
+    def _on_xfa_ready(self, fields: int, pages: int) -> None:
+        self.show_message(
+            f"Etkileşimli XFA formu açıldı — {fields} alan, {pages} sayfa. "
+            "Seçimlere göre açılan bölümler ve tablo satırları çalışır."
+        )
+        self._on_xfa_pages(pages)
+
+    def _on_xfa_pages(self, pages: int) -> None:
+        self._syncing = True
+        try:
+            self.page_spin.setRange(1, max(pages, 1))
+            self.page_total.setText(f"/ {pages}")
+        finally:
+            self._syncing = False
+
+    def _on_xfa_edited(self) -> None:
+        if not self.controller.document.is_dirty:
+            self.controller.document.mark_dirty()
+            self._update_title()
+
+    def flush_xfa_values(self) -> bool:
+        """Formdaki değerleri belgenin ``datasets`` paketine yazar.
+
+        Kaydetmeden önce çağrılır: XFA'da veri sayfa akışında değil bu pakette
+        durur, dolayısıyla dosyayı olduğu gibi kaydetmek yetmez.
+        """
+        if not self.in_xfa_mode:
+            return True
+        degerler = self.xfa_view.values_blocking()
+        if not degerler:
+            return True
+        kok = self._xfa_form.root if self._xfa_form else "form"
+        if not xfa.write_values(self.controller.document.raw, degerler, kok):
+            QMessageBox.warning(
+                self, "Form",
+                "Form verisi yazılamadı. Belge salt okunur olabilir.")
+            return False
+        return True
+
+    def export_xfa_pdf(self) -> None:
+        """Formun **görünen** hâlini PDF'e aktarır.
+
+        Statik çizimden farkı: betiklerle açılmış bölümler, eklenmiş satırlar
+        ve doldurulmuş değerler ekranda ne ise çıktıda da odur.
+        """
+        if not self.in_xfa_mode:
+            return
+        baslangic = os.path.join(
+            self.settings.last_directory,
+            (self.controller.document.display_name or "form").rsplit(".", 1)[0]
+            + "_dolu.pdf",
+        )
+        yol, _ = QFileDialog.getSaveFileName(
+            self, "Formu PDF olarak dışa aktar", baslangic, PDF_FILTER)
+        if not yol:
+            return
+        if not yol.lower().endswith(".pdf"):
+            yol += ".pdf"
+
+        def bitti(basarili: bool) -> None:
+            if basarili:
+                self.settings.last_directory = os.path.dirname(yol)
+                self.show_message(f"Form PDF olarak kaydedildi: {yol}")
+            else:
+                QMessageBox.warning(self, "Dışa aktar", "PDF yazılamadı.")
+
+        self.xfa_view.export_pdf(yol, bitti)
 
     def render_xfa_form_all(self) -> None:
         """Betikle açılan bölümler dâhil, formun tamamını çizer."""
@@ -852,6 +1039,9 @@ class MainWindow(QMainWindow):
     def _on_page_spin(self, value: int) -> None:
         if self._syncing or not self.controller.is_open:
             return
+        if self.in_xfa_mode:
+            self.xfa_view.go_to_page(value - 1)
+            return
         self.view.go_to_page(value - 1)
 
     def _on_zoom_changed(self, zoom: float) -> None:
@@ -921,7 +1111,7 @@ class MainWindow(QMainWindow):
 
     def open_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "PDF aç", self.settings.last_directory, PDF_FILTER
+            self, "Belge aç", self.settings.last_directory, OPEN_FILTER
         )
         if path:
             self.open_path(path)
@@ -967,6 +1157,8 @@ class MainWindow(QMainWindow):
     def save(self) -> bool:
         if not self.controller.is_open:
             return False
+        if not self.flush_xfa_values():
+            return False
         if not self.controller.path:
             return self.save_as()
         try:
@@ -979,6 +1171,8 @@ class MainWindow(QMainWindow):
 
     def save_as(self) -> bool:
         if not self.controller.is_open:
+            return False
+        if not self.flush_xfa_values():
             return False
         start = self.controller.path or os.path.join(
             self.settings.last_directory, "belge.pdf"

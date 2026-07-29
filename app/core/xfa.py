@@ -259,9 +259,22 @@ def read_values(datasets: bytes) -> dict[str, str]:
     degerler: dict[str, str] = {}
 
     def gez(dugum, yol: list[str]) -> None:
+        # Aynı adlı kardeşler yinelenen satırlardır; dizinlenmezse hepsi aynı
+        # yola yazılır ve yalnızca sonuncusu kalır.
+        sayim: dict[str, int] = {}
+        for cocuk in dugum:
+            sayim[_local(cocuk.tag)] = sayim.get(_local(cocuk.tag), 0) + 1
+        gorulen: dict[str, int] = {}
+
         for cocuk in dugum:
             ad = _local(cocuk.tag)
-            yeni = yol + [ad]
+            if sayim[ad] > 1:
+                sira = gorulen.get(ad, 0)
+                gorulen[ad] = sira + 1
+                adim = f"{ad}[{sira}]"
+            else:
+                adim = ad
+            yeni = yol + [adim]
             cocuklu = len(list(cocuk)) > 0
             if not cocuklu and (cocuk.text or "").strip():
                 degerler[".".join(yeni)] = cocuk.text.strip()
@@ -271,6 +284,30 @@ def read_values(datasets: bytes) -> dict[str, str]:
     for kokveri in veri:
         gez(kokveri, [_local(kokveri.tag)])
     return degerler
+
+
+#: ``ad[3]`` biçimindeki yol adımı — yinelenen alt formların örnek dizini
+_STEP_RE = re.compile(r"^(.*?)\[(\d+)\]$")
+
+
+def _parse_step(step: str) -> tuple[str, int]:
+    """``"row[2]"`` -> ``("row", 2)``; dizin yoksa 0."""
+    eslesme = _STEP_RE.match(step)
+    if eslesme:
+        return eslesme.group(1), int(eslesme.group(2))
+    return step, 0
+
+
+def _step_into(node: ET.Element, name: str, index: int) -> ET.Element:
+    """``node`` altındaki ``index``inci ``name`` düğümü; yoksa oluşturur.
+
+    Yinelenen satırlar (tablo satırları, mali yıllar) veri ağacında aynı adlı
+    kardeş düğümler olarak durur; dizin bu kardeşler arasında seçer.
+    """
+    esler = [c for c in node if c.tag == name]
+    while len(esler) <= index:
+        esler.append(ET.SubElement(node, name))
+    return esler[index]
 
 
 def build_datasets(values: dict[str, str], root_name: str = "form") -> bytes:
@@ -287,22 +324,17 @@ def build_datasets(values: dict[str, str], root_name: str = "form") -> bytes:
     for yol, deger in values.items():
         if not str(deger).strip():
             continue
-        parcalar = [p for p in yol.split(".") if p]
+        parcalar = [_parse_step(p) for p in yol.split(".") if p]
         if not parcalar:
             continue
         # Şablon yolları kök altformla başlar; datasets ağacı da öyle olmalı.
-        if parcalar[0] not in kokler:
-            kokler[parcalar[0]] = ET.SubElement(veri, parcalar[0])
-        dugum = kokler[parcalar[0]]
-        for parca in parcalar[1:-1]:
-            sonraki = dugum.find(parca)
-            if sonraki is None:
-                sonraki = ET.SubElement(dugum, parca)
-            dugum = sonraki
-        yaprak = dugum.find(parcalar[-1]) if len(parcalar) > 1 else None
-        if yaprak is None:
-            yaprak = ET.SubElement(dugum, parcalar[-1])
-        yaprak.text = str(deger)
+        kok_ad = parcalar[0][0]
+        if kok_ad not in kokler:
+            kokler[kok_ad] = ET.SubElement(veri, kok_ad)
+        dugum = kokler[kok_ad]
+        for ad, dizin in parcalar[1:]:
+            dugum = _step_into(dugum, ad, dizin)
+        dugum.text = str(deger)
 
     if not len(veri):
         veri.set(f"{{{_DATA_NS}}}dataNode", "dataGroup")

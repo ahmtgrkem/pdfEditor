@@ -29,6 +29,9 @@ for package in ("pymupdf", "fitz"):
         pass
 
 # --- Gizli importlar ---------------------------------------------------
+# Dinamik XFA formları Qt WebEngine'de çalışır (bkz. app/ui/xfa_view.py).
+# Görünüm gecikmeli import edildiği için WebEngine ve bağımlılıkları burada
+# açıkça sayılır; aksi hâlde paketten düşer ve etkileşimli form açılmaz.
 hiddenimports = [
     "pymupdf",
     "pymupdf.mupdf",
@@ -40,9 +43,32 @@ hiddenimports = [
     "PySide6.QtWidgets",
     "PySide6.QtGui",
     "PySide6.QtCore",
+    "PySide6.QtNetwork",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtWebChannel",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.QtQuickWidgets",
+    "PySide6.QtOpenGL",
+    "PySide6.QtOpenGLWidgets",
+    "PySide6.QtPositioning",
 ]
 try:
     hiddenimports += collect_submodules("app")
+except Exception:
+    pass
+
+# WebEngine yalnız DLL değil; kendi alt süreci (QtWebEngineProcess.exe),
+# .pak kaynakları ve yerelleştirmeleri olmadan çalışmaz.
+try:
+    from PyInstaller.utils.hooks import collect_data_files
+    datas += collect_data_files("PySide6", includes=[
+        "**/QtWebEngineProcess*",
+        "**/resources/*.pak",
+        "**/resources/*.dat",
+        "**/translations/qtwebengine_locales/*",
+    ])
 except Exception:
     pass
 
@@ -51,16 +77,8 @@ excludes = [
     "tkinter",
     "unittest",
     "pydoc_data",
-    "PySide6.QtWebEngineCore",
-    "PySide6.QtWebEngineWidgets",
-    "PySide6.QtWebEngineQuick",
-    "PySide6.QtWebChannel",
     "PySide6.QtWebSockets",
-    "PySide6.QtQml",
-    "PySide6.QtQuick",
     "PySide6.QtQuick3D",
-    "PySide6.QtQuickWidgets",
-    "PySide6.QtQuickControls2",
     "PySide6.Qt3DCore",
     "PySide6.Qt3DRender",
     "PySide6.QtCharts",
@@ -88,11 +106,14 @@ a = Analysis(
     noarchive=False,
 )
 
-# Gereksiz Qt DLL'lerini paketten temizle
+# Gereksiz Qt DLL'lerini paketten temizle.
+# DİKKAT: Qt6WebEngine*/Qt6WebChannel/Qt6Quick/Qt6Qml burada **olamaz** —
+# etkileşimli XFA görünümü bunlara dayanır (Qt6Concurrent'a da WebEngine
+# ihtiyaç duyar).
 _UNWANTED_DLL = (
-    "Qt6Quick", "Qt6Qml", "Qt6Pdf", "Qt63D", "Qt6Charts", "Qt6DataVisualization",
-    "Qt6Multimedia", "Qt6WebEngine", "Qt6WebSockets", "Qt6WebChannel",
-    "Qt6Designer", "Qt6Test", "Qt6Sql", "Qt6Help", "Qt6Concurrent",
+    "Qt6Pdf", "Qt63D", "Qt6Charts", "Qt6DataVisualization",
+    "Qt6Multimedia", "Qt6WebSockets",
+    "Qt6Designer", "Qt6Test", "Qt6Sql", "Qt6Help",
 )
 
 a.binaries = [

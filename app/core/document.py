@@ -79,6 +79,116 @@ def normalize_text(text: str) -> str:
     return text
 
 
+#: Dosya imzası -> MuPDF biçim adı. **Yalnızca imzası tutan** biçim denenir:
+#: rastgele baytları sırayla her ayrıştırıcıya vermek MuPDF'i çökertiyor.
+_MAGIC = (
+    (b"%PDF-", ("pdf",)),
+    (b"\x89PNG\r\n\x1a\n", ("png",)),
+    (b"\xff\xd8\xff", ("jpg",)),
+    (b"GIF87a", ("gif",)),
+    (b"GIF89a", ("gif",)),
+    (b"BM", ("bmp",)),
+    (b"II*\x00", ("tiff",)),
+    (b"MM\x00*", ("tiff",)),
+    (b"PK\x03\x04", ("epub", "xps", "cbz")),   # zip tabanlı biçimler
+    (b"<?xml", ("svg",)),
+    (b"<svg", ("svg",)),
+    (b"P1", ("pnm",)), (b"P2", ("pnm",)), (b"P3", ("pnm",)),
+    (b"P4", ("pnm",)), (b"P5", ("pnm",)), (b"P6", ("pnm",)),
+)
+
+
+def _sniff(data: bytes) -> tuple[str, ...]:
+    """İçeriğin imzasına göre denenecek biçimler."""
+    bas = data[:16]
+    for imza, turler in _MAGIC:
+        if bas.startswith(imza):
+            return turler
+    return ()
+
+
+def _as_pdf(doc: fitz.Document) -> tuple[fitz.Document, bool]:
+    """PDF olmayan belgeyi PDF'e çevirir -> (belge, çevrildi mi).
+
+    Görsel/XPS/EPUB gibi dosyalar PDF'e çevrilmeden düzenlenemez; çevrildiğini
+    bildirmek önemlidir, çünkü artık kaynak dosyanın üzerine yazılmamalıdır.
+    """
+    if doc.is_pdf:
+        return doc, False
+    try:
+        veri = doc.convert_to_pdf()
+    except Exception:  # noqa: BLE001 - çevrilemiyorsa olduğu gibi bırak
+        return doc, False
+    finally:
+        pass
+    yeni = fitz.open(stream=veri, filetype="pdf")
+    doc.close()
+    return yeni, True
+
+
+def open_tolerant(path: str) -> tuple[fitz.Document, bool]:
+    """Bozuk/etiketi yanlış dosyaları da açmayı dener.
+
+    Sırasıyla: (1) olağan açılış, (2) PDF olduğunu varsayarak baytlardan,
+    (3) ``%PDF`` başlığından önceki çöpü atlayarak (indirme artığı ya da
+    e-posta üstbilgisi eklenmiş dosyalar), (4) MuPDF'in desteklediği diğer
+    biçimler. Döndürdüğü ikinci değer, dosyanın onarılarak açıldığını söyler.
+
+    Amaç: kullanıcının açamadığı bir dosya kalmasın. Onarım MuPDF'in kendi
+    kurtarma yolunu kullanır; içerik kaybı olabileceği çağırana bildirilir.
+    """
+    hatalar: list[str] = []
+    try:
+        doc = fitz.open(path)
+        if doc.page_count > 0 or doc.needs_pass:
+            onarildi = bool(getattr(doc, "is_repaired", False))
+            doc, cevrildi = _as_pdf(doc)
+            return doc, onarildi or cevrildi
+        doc.close()
+        hatalar.append("belge boş")
+    except Exception as exc:  # noqa: BLE001 - kütüphane geniş hata atar
+        hatalar.append(str(exc))
+
+    try:
+        with open(path, "rb") as dosya:
+            veri = dosya.read()
+    except OSError as exc:
+        raise PdfError(f"Dosya okunamadı: {exc}") from exc
+    if not veri:
+        raise PdfError("Dosya boş.")
+
+    # (2)/(3): PDF olarak zorla; gerekirse başlıktan itibaren
+    adaylar = [veri]
+    ofset = veri.find(b"%PDF-")
+    if ofset > 0:
+        adaylar.append(veri[ofset:])
+    for parca in adaylar:
+        try:
+            doc = fitz.open(stream=parca, filetype="pdf")
+            if doc.page_count > 0 or doc.needs_pass:
+                return doc, True
+            doc.close()
+        except Exception as exc:  # noqa: BLE001
+            hatalar.append(str(exc))
+
+    # (4): uzantısı yanlış olabilir — imzası tutan biçimleri dene
+    for tur in _sniff(veri):
+        if tur == "pdf":
+            continue                    # (2)'de zaten denendi
+        try:
+            doc = fitz.open(stream=veri, filetype=tur)
+            if doc.page_count > 0:
+                return _as_pdf(doc)[0], True
+            doc.close()
+        except Exception:  # noqa: BLE001 - biçim tutmadı, sıradaki
+            continue
+
+    raise PdfError(
+        "Dosya açılamadı; tanınan bir belge biçimi değil.\n"
+        + "\n".join(dict.fromkeys(hatalar[:3]))
+    )
+
+
 class PdfDocument:
     """Açık bir PDF belgesini temsil eder."""
 
@@ -88,6 +198,8 @@ class PdfDocument:
         self._path: str | None = None
         self._password: str | None = None
         self._dirty = False
+        #: Dosya onarılarak açıldı mı (bozuk PDF / yanlış uzantı)
+        self._repaired = False
         # Yapısal değişiklikte (sayfa ekleme/silme/sıralama) artar -> tüm önbellek düşer
         self._generation = 0
         # Sayfa içeriği değişince artar -> yalnızca o sayfanın önbelleği düşer
@@ -121,6 +233,11 @@ class PdfDocument:
     @property
     def is_dirty(self) -> bool:
         return self._dirty
+
+    @property
+    def was_repaired(self) -> bool:
+        """Dosya onarılarak/biçimi tahmin edilerek açıldıysa ``True``."""
+        return self._repaired
 
     @property
     def generation(self) -> int:
@@ -157,10 +274,7 @@ class PdfDocument:
     def open(self, path: str, password: str | None = None) -> None:
         """Diskten belge açar. Şifreliyse :class:`PasswordRequired` fırlatır."""
         with self._lock:
-            try:
-                doc = fitz.open(path)
-            except Exception as exc:  # noqa: BLE001 - kütüphane geniş hata atar
-                raise PdfError(f"Dosya açılamadı: {exc}") from exc
+            doc, onarildi = open_tolerant(path)
 
             if doc.needs_pass:
                 if not password or not doc.authenticate(password):
@@ -169,9 +283,13 @@ class PdfDocument:
 
             self.close()
             self._doc = doc
-            self._path = path
+            self._repaired = onarildi
+            # PDF olmayan bir kaynak PDF'e çevrildiyse yol taşınmaz: "Kaydet"
+            # kullanıcının görselinin/EPUB'ının üzerine PDF yazmamalı.
+            cevrildi = onarildi and not path.lower().endswith(".pdf")
+            self._path = None if cevrildi else path
             self._password = password
-            self._dirty = False
+            self._dirty = cevrildi
             self._generation += 1
             self._page_revs.clear()
 
@@ -218,6 +336,7 @@ class PdfDocument:
                 self._path = None
                 self._password = None
                 self._dirty = False
+                self._repaired = False
 
     # ------------------------------------------------------------------
     # Sayfa bilgileri

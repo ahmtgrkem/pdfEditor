@@ -17,8 +17,12 @@ uygulaması. Python 3.10+, PySide6 (Qt 6) ve PyMuPDF üzerine kurulu; temiz katm
 - Dosyayı pencerenin **herhangi bir yerine** sürükleyip bırakarak açma
   (belge alanı ve küçük resim paneli dâhil)
 - **XFA (etkileşimli XML) formu** desteği: "Adobe Reader gerekli" uyarısı
-  yerine formun kendisi çizilir ve doldurulabilir — bkz.
+  yerine formun kendisi **çalışır** — seçime göre açılan bölümler, tabloya
+  satır ekleme, bağlı açılır listeler, alan doğrulama — bkz.
   [XFA formları](#xfa-etkileşimli-form-desteği)
+- **Açamadığı dosya bırakmaz:** bozuk xref, başlıktan önce çöp taşıyan ya da
+  uzantısı yanlış dosyalar onarılarak açılır; görsel/EPUB/XPS kaynaklar
+  PDF'e çevrilir
 - Ctrl + fare tekerleği ile yakınlaştırma, sayfaya sığdır / genişliğe sığdır
 - Tek sayfa, sürekli kaydırma ve çift sayfa (kitap) görünümleri
 - Sayfa önizlemeleri, içindekiler (yer imleri) ağacı ve belge içi arama paneli
@@ -92,6 +96,8 @@ pdfEditor/
 │   │   ├── form_fields.py    # AcroForm alanlarını okuma/yazma
 │   │   ├── xfa.py            # XFA form alanlarını okuma/doldurma
 │   │   ├── xfa_render.py     # XFA şablonunu görüntülenebilir PDF'e çizme
+│   │   ├── xfa_html.py       # XFA şablonunu canlı HTML forma derleme
+│   │   ├── xfa_runtime.py    # XFA nesne modeli + sayfalama (JavaScript)
 │   │   └── history.py        # Anlık görüntü tabanlı geri al/yinele
 │   ├── services/             # Qt köprüsü
 │   │   ├── document_controller.py   # UI ↔ core arasındaki tek kapı
@@ -200,64 +206,73 @@ Bu bir bozukluk değildir: form içeriği gerçekten sayfada yoktur. Adobe Reade
 dışında hemen hiçbir görüntüleyici (MuPDF, Chrome, Edge, Preview) bu şablonu
 çizemez.
 
-Uygulama iki yol sunar.
+Uygulama formu **çizmekle yetinmez, çalıştırır**.
 
-### 1. Formu görüntüle (varsayılan)
+### 1. Canlı form görünümü (varsayılan)
 
-XFA belgesi açıldığında form **kendiliğinden** çizilir; soru sorulmaz.
-Yeniden üretmek için *Araçlar ▸ Formu görüntüle (XFA)*.
+XFA belgesi açıldığında form etkileşimli olarak açılır; soru sorulmaz.
+Şablon HTML'e derlenir ve gerçek bir JavaScript motorunda (Qt WebEngine)
+çalıştırılır — şablondaki betikler zaten JavaScript'tir. Böylece
+Adobe/Foxit'teki davranışın tamamı işler:
 
-Şablondaki yerleşim hesaplanır, metin/çizgi/görseller sayfaya işlenir ve
-alanlar gerçek **AcroForm widget'ları** olarak eklenir. Sonuç, **her
-görüntüleyicide açılan ve doldurulabilen sıradan bir PDF**'tir ve belgenin
-Adobe/Foxit'teki görünümünü hedefler:
-
-| Öğe | Davranış |
+| Davranış | Sonuç |
 |---|---|
-| `position` (varsayılan düzen) | Çocuklar kendi `x`/`y` değerleriyle |
-| `tb` | Yukarıdan aşağıya akış, taşınca yeni sayfa |
-| `table` / `row` | Satırlar dikey, hücreler yatay |
-| `pageArea` | Arka plan deseni, logo ve altbilgi her sayfaya çizilir |
-| `border` kenarları | Üst/sağ/alt/sol ayrı ayrı; çoğu alanda yalnızca alt kenar → alt çizgi stili |
-| `caption placement` / `reserve` | Etiket sol/sağ/üst/alt, ayrılan genişlikle |
-| `checkButton shape="round"` | Radyo düğmesi (kare kutu değil) |
-| `margin` iç boşlukları | Bitişik alanlar birbirine yapışmaz |
-| `imageEdit` alanları | Değerlerindeki görsel çizilir (logo, bayrak) |
-| Altbilgi `xfa:embed` | `Page <n> of <m>` sayaçları yerine konur |
-| Onay kutusu / radyo | Çerçeveli çizilir; kenarlıksız kutu tıklanabilir görünmez |
+| Seçime bağlı bölümler | "Lead applicant" seçilince kimlik, profil, mali veri… bölümleri açılır |
+| Dinamik sayfalama | Bölümler açılıp kapandıkça sayfa sayısı anında değişir |
+| Tablo satırları | `+` / `-` düğmeleri satır ekler ve siler (`instanceManager`) |
+| Bağlı listeler | Ülke seçimi hukuki biçim listesini, o da kategori listesini doldurur |
+| Alan doğrulama | Hatalı e-posta/tarih uyarı verir ve alanı temizler |
+| Doğrulama vurgusu | Kaydetmeden önce eksik zorunlu alanlar kırmızıya alınır |
+| Dosya ekleri | "Attach" düğmeleri dosya seçtirir, ad forma yazılır |
+| Sayfa altbilgisi | `Page <n> of <m>` sayaçları yerine konur |
+
+Yerleşim XFA kutu modelinden CSS'e birebir çevrilir: `position` mutlak
+konum, `tb`/`table` akış, `row` yatay dizilim. Bir bölüm gizlenince
+tarayıcı geri kalanı kendiliğinden yukarı çeker — dinamik formun can alıcı
+davranışı buradan gelir.
+
+**Kaydetme.** *Kaydet* / *Farklı Kaydet* girilen değerleri özgün belgenin
+`datasets` paketine yazar. Adobe verileri zaten oradan okur; dosya
+Adobe/Foxit'te dolu olarak açılır. Belge XFA olarak kalır — statik bir
+kopyaya çevrilmez.
+
+**PDF'e aktarma.** *Araçlar ▸ Doldurulmuş formu PDF'e aktar…* ekranda ne
+görünüyorsa onu basar: açılmış bölümler, eklenmiş satırlar ve girilen
+değerlerle birlikte. Sayfa bölmesi tarayıcıya bırakılmaz; her sayfa ayrı
+basılıp birleştirilir, yoksa sayfa başına birkaç puntoluk kayma birikir.
+
+### 2. Statik çizim (yedek yol)
+
+*Araçlar ▸ Formu görüntüle (XFA)* şablonu tek seferlik bir görüntüye çevirir:
+yerleşim hesaplanır ve alanlar gerçek **AcroForm widget'ları** olarak eklenir.
+Sonuç her görüntüleyicide açılan sıradan bir PDF'tir; betikler çalışmadığı
+için seçime bağlı bölümler açılmaz. *Formu tüm bölümleriyle görüntüle*
+gizli bölümleri de çizer.
 
 Üretilen belge **adsız** açılır — diskteki dosyanın karşılığı olmadığı için
 "Kaydet" özgün XFA dosyasının üzerine yazmaz, "Farklı Kaydet" sorar.
 
-### 1b. Tüm bölümleriyle görüntüle
-
-*Araçlar ▸ Formu tüm bölümleriyle görüntüle* — özgün belgede yalnızca
-seçime göre açılan (`presence="hidden"`) bölümleri de çizer. Görünüm
-özgününe sadık değildir ama formun tamamı tek seferde doldurulabilir.
-Örnek formda: özgün görünüm 1 sayfa / 5 alan, tüm bölümler 3 sayfa /
-66 alan.
-
-### 2. Alanları doğrudan doldur
+### 3. Alanları listeden doldur
 
 *Araçlar ▸ Etkileşimli formu doldur…* alanları bölümlere ayrılmış bir
-iletişim kutusunda sunar. Girilen değerler özgün belgenin `datasets`
-paketine yazılır — Adobe verileri zaten oradan okuduğu için **kaydedilen
-dosya Adobe Reader'da dolu olarak açılır**. Alan yolları altform
-hiyerarşisini izler (`form.PADORV2.Identification.orgName`).
+iletişim kutusunda sunar. Yerleşimden bağımsız, hızlı toplu doldurma içindir.
 
 ### Sınırlar ve kabuller
 
-- **Betik kuralları çalıştırılmaz** (koşullu alanlar, hesaplamalar). Özgün
-  belgede bir seçim yapılınca açılan bölümler kendiliğinden görünmez;
-  bunun için "tüm bölümleriyle" seçeneği vardır.
-- Yerleşim Adobe'nin çıktısıyla piksel birebir değildir; bölüm sırası ve
-  alan konumları doğru, boşluklar farklılaşabilir.
-- Görünür bir metinle örtüşen gizli kopyalar elenir (koşullu başlıklar
-  aynı yere iki kez yazılır, elenmezse üst üste biner).
-- `presence="invisible"` alanlar çizilmez: bunlar ekranda yer kaplamayan
-  iç veri taşıyıcılarıdır (dosya eki içeriği gibi).
+- Gerçeklenen betik yüzeyi: `rawValue`, `presence`, `access`,
+  `border.presence`, `parent`, `index`, `instanceManager`, `resolveNode(s)`,
+  `clearItems`/`addItem`, `xfa.layout.page(Count)`, `app.alert`, `xfa.host`,
+  dosya eki nesneleri ve `click`/`exit`/`enter`/`change`/`preOpen`/`ready`/
+  `preSave` olayları.
+- **FormCalc çalıştırılmaz** (yalnızca JavaScript betikleri). Dijital imza
+  ve zengin metin biçimlendirme desteklenmez.
+- Yerleşim Adobe'nin çıktısıyla piksel birebir değildir; bölüm sırası, alan
+  konumları ve sayfa bölmeleri doğru, boşluklar farklılaşabilir.
+- `presence="invisible"` öğeler çizilmez: bunlar ekranda yer kaplamayan iç
+  veri taşıyıcılarıdır (dosya eki içeriği gibi).
 - Onay kutusunda şablondaki `<value>` mevcut durum değil, kutu
   işaretlenince kaydedilecek değerdir; durum yalnızca form verisinden gelir.
+- Canlı görünüm Qt WebEngine gerektirir; yoksa uygulama statik çizime düşer.
 
 ---
 
@@ -335,6 +350,9 @@ $env:QT_QPA_PLATFORM="windows"; pytest tests -q    # gerçek pencerelerle
 | `test_03_ui_widgets.py` | Paneller, kısayollar, araç çubukları |
 | `test_04_inline_text.py` | Canlı metin düzenleyici: hizalama, punto, taban çizgisi |
 | `test_05_updater.py` | Güncelleme servisi (ağ taklitli), diyaloglar, kurulum |
+| `test_06_xfa_and_drop.py` | XFA okuma/çizme, canlı görünüme geçiş, sürükle-bırak |
+| `test_07_form_interaction.py` | AcroForm alanlarıyla etkileşim |
+| `test_08_xfa_live_form.py` | XFA→HTML derleyici, canlı motor (betik/sayfalama), dayanıklı açma |
 
 > Not: `offscreen` platformunda Qt taslak font metrikleri döndürür. Bu yüzden
 > hizalama testleri mutlak `bbox` yerine "düzenleyicinin bildirdiği taban

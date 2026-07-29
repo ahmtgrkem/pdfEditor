@@ -588,30 +588,34 @@ class TestXfaCizim:
 
 
 class TestXfaArayuz:
-    def test_xfa_acilinca_form_kendiliginden_cizilir(self, qapp, window, xfa_pdf):
-        """Kullanıcıya soru sorulmaz: dosya açılır ve form görünür olur.
+    def test_xfa_acilinca_canli_gorunume_gecilir(self, qapp, window, xfa_pdf):
+        """Kullanıcıya soru sorulmaz: dosya açılır ve form etkileşimli gelir.
 
-        Önceden modal bir kutu çıkıyor, dosyayı görebilmek için önce ona
-        cevap vermek gerekiyordu.
+        Belgenin kendisine dokunulmaz — XFA verisi ``datasets`` paketinde
+        durur ve kaydetme oraya yazar; statik bir kopyaya çevirmek dinamik
+        davranışı (seçime göre açılan bölümler) yok ederdi.
         """
         assert window._actions["xfa_render"].isEnabled() is False
         window.open_path(str(xfa_pdf))
-        qapp.processEvents()          # otomatik çizim kuyruğa alınır
+        qapp.processEvents()          # canlı görünüm kuyruğa alınır
         qapp.processEvents()
 
+        assert window.in_xfa_mode is True
         ham = window.controller.document.raw
-        assert xfa.is_xfa(ham) is False, "form çizilmiş olmalı"
-        assert ham.is_form_pdf, "alanlar doldurulabilir olmalı"
-        # Kaynak saklandığı için diğer görünüme geçilebilir.
+        assert xfa.is_xfa(ham) is True, "özgün belge korunmalı"
         assert window._xfa_source is not None
+        assert window._actions["xfa_export"].isEnabled() is True
         assert window._actions["xfa_render_all"].isEnabled() is True
 
-    def test_cizilen_formda_tum_doldurulabilir_alanlar_bulunur(
-        self, qapp, window, xfa_pdf
-    ):
+    def test_statik_cizim_hala_istenebilir(self, qapp, window, xfa_pdf):
+        """Canlı görünüm varsayılan; statik çizim menüden erişilebilir kalır."""
         window.open_path(str(xfa_pdf))
         qapp.processEvents()
         qapp.processEvents()
+
+        assert window.render_xfa_form(silent=True) is True
+        qapp.processEvents()
+        assert window.in_xfa_mode is False
         adlar = {w.field_name for s in window.controller.document.raw
                  for w in s.widgets()}
         assert len(adlar) == 3          # düğme doldurulabilir sayılmaz
