@@ -13,7 +13,16 @@ MAX_RECENT = 12
 
 class AppSettings:
     def __init__(self) -> None:
-        self._s = QSettings(__org_name__, __app_name__)
+        # DİKKAT: ``QSettings(org, app)`` iki argümanlı kurucusu biçimi her
+        # zaman NativeFormat kabul eder ve ``setDefaultFormat`` çağrısını yok
+        # sayar. Testler ayarları izole etmek için ``setDefaultFormat`` +
+        # ``setPath`` kullandığından, o kurucuyla testler kullanıcının gerçek
+        # kayıt defterine yazıyordu (güncelleme adresi test değerinde kalıp
+        # kurulu uygulamayı bozdu). Biçimi açıkça vererek izolasyon çalışır;
+        # üretimde varsayılan yine NativeFormat olduğu için davranış değişmez.
+        self._s = QSettings(
+            QSettings.defaultFormat(), QSettings.UserScope, __org_name__, __app_name__
+        )
 
     # -- genel ---------------------------------------------------------
     def value(self, key: str, default: Any = None, type_: type | None = None) -> Any:

@@ -242,6 +242,41 @@ class TestIndirme:
 
 
 # ======================================================================
+# 5.3b Ayar izolasyonu
+# ======================================================================
+class TestAyarIzolasyonu:
+    """Testler kullanıcının gerçek ayarlarına asla yazmamalı.
+
+    Bu bir kez kırıldı ve fark edilmesi zor oldu: testler kullanıcının
+    kayıt defterindeki ``update/feed_url`` değerini ``https://ornek.test/...``
+    yapınca kurulu uygulama güncelleme sunucusuna hiç ulaşamaz hale geldi
+    ("getaddrinfo failed"). Sebep ``QSettings(org, app)`` kurucusunun
+    ``setDefaultFormat`` çağrısını yok sayıp NativeFormat kullanmasıydı.
+    """
+
+    def test_ayarlar_kayit_defterine_yazmaz(self, qapp, settings_dir):
+        from app.services.settings import AppSettings
+
+        dosya = AppSettings()._s.fileName()
+        assert "HKEY" not in dosya.upper(), (
+            f"Ayarlar kullanıcının kayıt defterine yazıyor: {dosya}"
+        )
+        assert str(settings_dir) in dosya.replace("/", os.sep), (
+            f"Ayarlar izole dizinde değil: {dosya}"
+        )
+
+    def test_feed_url_degisikligi_izole_kalir(self, qapp, settings_dir):
+        from app.services.settings import AppSettings
+
+        ayarlar = AppSettings()
+        ayarlar.update_feed_url = "https://ornek.test/version.json"
+        ayarlar.sync()
+
+        assert "HKEY" not in ayarlar._s.fileName().upper()
+        assert os.path.isfile(ayarlar._s.fileName()), "Değer ini dosyasına yazılmalı"
+
+
+# ======================================================================
 # 5.4 Servis akışı (sinyaller)
 # ======================================================================
 class TestUpdaterService:

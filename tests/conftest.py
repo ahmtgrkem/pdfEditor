@@ -35,9 +35,17 @@ SAMPLE_BODY = "Lorem ipsum dolor sit amet consectetur adipiscing elit"
 # ======================================================================
 # Uygulama
 # ======================================================================
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def settings_dir(tmp_path_factory):
-    """Kullanıcının gerçek ayarlarını bozmamak için izole QSettings dizini."""
+    """Kullanıcının gerçek ayarlarını bozmamak için izole QSettings dizini.
+
+    ``autouse``: izolasyonun yalnızca ``qapp`` isteyen testlerde geçerli
+    olması yetmez — ayar nesnesi üreten her test korunmalı. Bu fikstür bir
+    kez atlandığında testler kullanıcının kayıt defterine yazar.
+
+    Ayrıca ``AppSettings`` biçimi açıkça vermek zorundadır; ``QSettings(org,
+    app)`` kurucusu buradaki ``setDefaultFormat`` çağrısını yok sayar.
+    """
     path = tmp_path_factory.mktemp("qsettings")
     QSettings.setDefaultFormat(QSettings.IniFormat)
     QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(path))
