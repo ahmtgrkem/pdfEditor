@@ -11,6 +11,10 @@ uygulaması. Python 3.10+, PySide6 (Qt 6) ve PyMuPDF üzerine kurulu; temiz katm
 ## Özellikler
 
 ### Görüntüleyici
+- Dosyayı pencerenin **herhangi bir yerine** sürükleyip bırakarak açma
+  (belge alanı ve küçük resim paneli dâhil)
+- **XFA (etkileşimli XML) formu** desteği — bkz.
+  [XFA formları](#xfa-etkileşimli-form-desteği)
 - Ctrl + fare tekerleği ile yakınlaştırma, sayfaya sığdır / genişliğe sığdır
 - Tek sayfa, sürekli kaydırma ve çift sayfa (kitap) görünümleri
 - Sayfa önizlemeleri, içindekiler (yer imleri) ağacı ve belge içi arama paneli
@@ -80,6 +84,7 @@ pdfEditor/
 │   │   ├── page_ops.py       # Döndür/sil/ekle/sırala/birleştir/böl
 │   │   ├── exporter.py       # Görsel/metin dışa aktarma, sıkıştırma, şifreleme
 │   │   ├── fonts.py          # Unicode (Türkçe) yazı tipi çözümleme
+│   │   ├── xfa.py            # XFA form alanlarını okuma/doldurma
 │   │   └── history.py        # Anlık görüntü tabanlı geri al/yinele
 │   ├── services/             # Qt köprüsü
 │   │   ├── document_controller.py   # UI ↔ core arasındaki tek kapı
@@ -88,6 +93,7 @@ pdfEditor/
 │   │   └── settings.py              # Kalıcı ayarlar (QSettings)
 │   ├── ui/                   # Sunum katmanı
 │   │   ├── main_window.py    # Menüler, araç çubukları, tüm akışlar
+│   │   ├── file_drop.py      # Dosya sürükle-bırak (alt widget'lar için)
 │   │   ├── page_view.py      # Sayfa görüntüleyici ve etkileşimli araçlar
 │   │   ├── inline_text_editor.py    # Canlı (tuval üzeri) metin düzenleyici
 │   │   ├── theme.py          # Koyu/açık tema ve stil sayfası
@@ -148,6 +154,37 @@ her zoom ve punto değerinde yatayda **0.000 pt**, dikeyde **≤ 0.01 pt**'dir
 
 Metin onaylandıktan sonra araç otomatik olarak `Tool.SELECT`e döner; sayfaya
 tekrar tıklamak yeni kutu açmaz.
+
+---
+
+## XFA (etkileşimli form) desteği
+
+Bazı kurumsal formlar (AB hibe başvuruları, resmî beyannameler…) içeriğini
+sayfa akışında değil, belgeye gömülü bir **XML şablonunda** taşır. Katalogda
+`/NeedsRendering true` işaretlidir ve sayfada yalnızca şu uyarı görünür:
+
+> The document you are trying to load requires Adobe Reader 8 or higher.
+
+Bu bir bozukluk değildir: form içeriği gerçekten sayfada yoktur. Adobe Reader
+dışında hemen hiçbir görüntüleyici (MuPDF, Chrome, Edge, Preview) bu şablonu
+çizemez.
+
+**Uygulamanın yaklaşımı:** şablonu çizmeye çalışmaz — XFA tam bir yerleşim
+motoru ve betik dili gerektirir. Bunun yerine formu *kullanılabilir* kılar:
+
+- Açılışta XFA tespit edilir ve kullanıcı bilgilendirilir (aksi hâlde dosya
+  açılamamış sanılır)
+- Alanlar, etiketleri, türleri ve açılır liste seçenekleri şablondan okunur
+- *Araçlar ▸ Etkileşimli formu doldur…* alanları bölümlere ayrılmış bir
+  formda sunar (metin, sayı, tarih, onay kutusu, açılır liste)
+- Girilen değerler `datasets` paketine yazılır — Adobe verileri zaten oradan
+  okuduğu için **kaydedilen dosya Adobe Reader'da dolu olarak açılır**
+
+Alan yolları altform hiyerarşisini izler (`form.PADORV2.Identification.orgName`)
+ve `datasets` ağacına aynı yapıda yazılır.
+
+**Sınır:** formun görsel yerleşimi çizilmez; alanlar liste hâlinde sunulur.
+Dinamik XFA'nın betik kuralları (koşullu alanlar, hesaplamalar) çalıştırılmaz.
 
 ---
 

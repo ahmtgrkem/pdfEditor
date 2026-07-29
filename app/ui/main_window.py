@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __app_name__, __version__
-from ..core import exporter, page_ops
+from ..core import exporter, page_ops, xfa
 from ..core.document import PasswordRequired, PdfError
 from ..services.document_controller import DocumentController
 from ..services.settings import AppSettings
@@ -52,6 +52,7 @@ from .dialogs import (
     WatermarkDialog,
 )
 from .dialogs.common import ColorButton
+from .file_drop import dropped_files
 from .page_view import PdfView, ViewMode, ZoomMode
 from .panels import OutlinePanel, SearchPanel, ThumbnailPanel
 from .tools import LABELS, Tool, ToolState
@@ -94,6 +95,8 @@ class MainWindow(QMainWindow):
         self._syncing = False
         #: Güncelleme servisi ilk ihtiyaç duyulduğunda kurulur (bkz. ``updater``)
         self._updater: UpdaterService | None = None
+        #: Açık belgedeki XFA formu (yoksa None)
+        self._xfa_form = None
         self._update_progress = None
         self._quitting_for_update = False
 
@@ -104,6 +107,9 @@ class MainWindow(QMainWindow):
 
         self.view = PdfView(self.controller, self.tools, self)
         self.setCentralWidget(self.view)
+        # Belge alanı sürükleme olaylarını kendi tükettiği için dosyayı
+        # buradan alırız; aksi hâlde pencerenin ortasına bırakmak çalışmaz.
+        self.view.filesDropped.connect(self.open_dropped_files)
 
         self._build_panels()
         self._build_actions()
@@ -120,6 +126,7 @@ class MainWindow(QMainWindow):
     # ==================================================================
     def _build_panels(self) -> None:
         self.thumbnails = ThumbnailPanel(self.controller, self)
+        self.thumbnails.filesDropped.connect(self.open_dropped_files)
         self.outline = OutlinePanel(self.controller, self)
         self.search = SearchPanel(self.controller, self)
 
@@ -247,6 +254,9 @@ class MainWindow(QMainWindow):
         A("merge", "PDF'leri birleştir…", "merge", None, self.merge_dialog)
         A("split", "PDF'i böl…", "split", None, self.split_dialog)
         A("watermark", "Filigran ekle…", "watermark", None, self.watermark_dialog)
+        # XFA yalnızca öyle bir form açıldığında etkinleşir (bkz. _check_xfa_form)
+        A("xfa_form", "Etkileşimli formu doldur…", "text", None,
+          self.xfa_form_dialog).setEnabled(False)
         A("export_images", "Görsele dönüştür…", "export_image", None, self.export_images_dialog)
         A("export_text", "Metin olarak kaydet…", None, None, self.export_text_dialog)
         A("compress", "Sıkıştır / optimize et…", "compress", None, self.compress_dialog)
@@ -354,6 +364,7 @@ class MainWindow(QMainWindow):
             m_tools.addAction(self.tool_actions[tool])
         m_tools.addSeparator()
         m_tools.addAction(a["watermark"])
+        m_tools.addAction(a["xfa_form"])
         m_tools.addSeparator()
         m_tools.addAction(a["merge"])
         m_tools.addAction(a["split"])
@@ -633,12 +644,17 @@ class MainWindow(QMainWindow):
             f"{self.controller.document.display_name} açıldı "
             f"({self.controller.page_count} sayfa)."
         )
+        # XFA kontrolü en sonda: uyarı diyaloğu açılışta gösterilir ve
+        # yukarıdaki durum mesajının üstüne yazar.
+        self._check_xfa_form()
 
     def _on_document_closed(self) -> None:
         self._update_page_widgets()
         self._update_actions()
         self._update_title()
         self.info_label.setText("")
+        self._xfa_form = None
+        self._actions["xfa_form"].setEnabled(False)
         self.show_message("Belge kapatıldı.")
 
     def _on_document_replaced(self) -> None:
@@ -646,6 +662,87 @@ class MainWindow(QMainWindow):
         self._update_actions()
         self._update_title()
         self._update_info_label()
+        self._check_xfa_form()
+
+    # ------------------------------------------------------------------
+    # XFA (etkileşimli XML) formları
+    # ------------------------------------------------------------------
+    def current_xfa_form(self):
+        """Açık belgedeki XFA formu; yoksa ``None``.
+
+        Yalnızca "belge yok" durumu yutulur. Geniş bir ``except`` burada
+        gerçek hataları gizler: ``_check_xfa_form``ın yanlış sinyale bağlı
+        olduğu, tam da bu yüzden fark edilmemişti.
+        """
+        if not self.controller.is_open:
+            return None
+        try:
+            ham = self.controller.document.raw
+        except PdfError:
+            return None
+        return xfa.load(ham)
+
+    def _check_xfa_form(self) -> None:
+        """Dinamik XFA açıldığında kullanıcıyı bilgilendirir.
+
+        Bu belgelerde sayfa akışında yalnızca "Adobe Reader gerekli" uyarısı
+        bulunur; hiçbir şey söylenmezse kullanıcı uygulamanın dosyayı
+        açamadığını sanır.
+        """
+        self._xfa_form = self.current_xfa_form()
+        var = self._xfa_form is not None and bool(self._xfa_form.editable_fields)
+        self._actions["xfa_form"].setEnabled(var)
+        if not var or not self._xfa_form.dynamic:
+            return
+
+        sayi = len(self._xfa_form.editable_fields)
+        self.show_message(
+            f"Bu bir etkileşimli XFA formu — {sayi} alan bulundu. "
+            "Araçlar ▸ Etkileşimli formu doldur…"
+        )
+        QMessageBox.information(
+            self, "Etkileşimli form",
+            "<h3>Bu belge bir XFA formu</h3>"
+            "<p>Form içeriği sayfaya değil, belgeye gömülü bir XML şablonuna "
+            "kayıtlıdır; bu yüzden sayfada yalnızca Adobe uyarısı görünür. "
+            "Bu, dosyanın bozuk olduğu anlamına gelmez.</p>"
+            f"<p><b>{sayi} doldurulabilir alan</b> okundu. "
+            "<i>Araçlar ▸ Etkileşimli formu doldur…</i> ile doldurup "
+            "kaydedebilirsiniz; dosya Adobe Reader'da dolu olarak açılır.</p>",
+        )
+
+    def xfa_form_dialog(self) -> None:
+        from .dialogs import XfaFormDialog
+
+        form = self.current_xfa_form()
+        if form is None or not form.editable_fields:
+            QMessageBox.information(
+                self, "Etkileşimli form",
+                "Bu belgede doldurulabilir XFA form alanı bulunamadı.",
+            )
+            return
+
+        dialog = XfaFormDialog(form, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        degerler = dialog.values()
+        if not degerler:
+            self.show_message("Form alanı doldurulmadı.")
+            return
+
+        if not xfa.write_values(self.controller.document.raw, degerler, form.root):
+            QMessageBox.warning(
+                self, "Etkileşimli form",
+                "Form verisi yazılamadı. Belge salt okunur olabilir.",
+            )
+            return
+
+        self.controller.document.mark_dirty()
+        self._update_title()
+        self.show_message(
+            f"{len(degerler)} alan dolduruldu. Kalıcı olması için belgeyi kaydedin."
+        )
 
     def _update_info_label(self) -> None:
         if not self.controller.is_open:
@@ -1491,20 +1588,34 @@ class MainWindow(QMainWindow):
     # Sürükle-bırak & kapanış
     # ==================================================================
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(".pdf"):
-                    event.acceptProposedAction()
-                    return
+        if dropped_files(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if dropped_files(event.mimeData()):
+            event.acceptProposedAction()
+            return
         event.ignore()
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        for url in event.mimeData().urls():
-            if url.isLocalFile() and url.toLocalFile().lower().endswith(".pdf"):
-                event.acceptProposedAction()
-                QTimer.singleShot(0, lambda p=url.toLocalFile(): self.open_path(p))
-                return
-        event.ignore()
+        paths = dropped_files(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.open_dropped_files(paths)
+
+    def open_dropped_files(self, paths: list[str]) -> None:
+        """Bırakılan ilk dosyayı açar.
+
+        Açma işi kuyruğa alınır: bırakma olayı sürerken modal diyalog
+        (parola sorma, kaydetme onayı) açmak sürükleme işlemini kilitler.
+        """
+        if not paths:
+            return
+        QTimer.singleShot(0, lambda p=paths[0]: self.open_path(p))
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # Güncelleme için kapanıyorsak kaydetme onayı zaten alındı.

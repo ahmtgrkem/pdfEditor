@@ -14,13 +14,19 @@ from PySide6.QtWidgets import (
 
 from ...services.document_controller import DocumentController
 from .. import icons, theme
+from ..file_drop import FileDropMixin, dropped_files
 
 THUMB_WIDTH = 132
 INDEX_ROLE = Qt.UserRole + 1
 
 
-class ThumbnailList(QListWidget):
-    """Sürükle-bırak sıralamayı destekleyen liste."""
+class ThumbnailList(FileDropMixin, QListWidget):
+    """Sürükle-bırak sıralamayı destekleyen liste.
+
+    ``FileDropMixin`` dışarıdan bırakılan PDF dosyalarını yakalar; dosya
+    içermeyen sürüklemeler ``super()``\'e devredildiği için sayfa sıralama
+    (iç sürükleme) aynen çalışmaya devam eder.
+    """
 
     orderChanged = Signal(list)
 
@@ -39,8 +45,13 @@ class ThumbnailList(QListWidget):
         self.setIconSize(QSize(THUMB_WIDTH, int(THUMB_WIDTH * 1.5)))
         self.setWordWrap(True)
         self.setTextElideMode(Qt.ElideRight)
+        self._setup_file_drops()
 
     def dropEvent(self, event) -> None:  # noqa: N802
+        # Dosya bırakıldıysa karışım halleder ve sıralamaya hiç dokunmaz.
+        if dropped_files(event.mimeData()):
+            super().dropEvent(event)
+            return
         before = [self.item(i).data(INDEX_ROLE) for i in range(self.count())]
         super().dropEvent(event)
         after = [self.item(i).data(INDEX_ROLE) for i in range(self.count())]
@@ -53,6 +64,8 @@ class ThumbnailPanel(QWidget):
 
     pageActivated = Signal(int)
     status = Signal(str)
+    #: Panele bırakılan PDF dosyaları (ana pencere açar)
+    filesDropped = Signal(list)
 
     def __init__(self, controller: DocumentController, parent=None) -> None:
         super().__init__(parent)
@@ -69,6 +82,7 @@ class ThumbnailPanel(QWidget):
         self.list.itemSelectionChanged.connect(self._on_selection)
         self.list.itemClicked.connect(self._on_clicked)
         self.list.orderChanged.connect(self._on_order_changed)
+        self.list.filesDropped.connect(self.filesDropped)
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._show_menu)
 

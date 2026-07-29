@@ -8,6 +8,7 @@ from .split_dialog import SplitDialog
 from .text_dialog import TextDialog
 from .update_dialog import UpdateAvailableDialog, UpdateProgressDialog
 from .watermark_dialog import WatermarkDialog
+from .xfa_dialog import XfaFormDialog
 
 __all__ = [
     "CompressDialog",
@@ -22,4 +23,5 @@ __all__ = [
     "UpdateAvailableDialog",
     "UpdateProgressDialog",
     "WatermarkDialog",
+    "XfaFormDialog",
 ]

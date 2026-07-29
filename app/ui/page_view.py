@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..services.document_controller import DocumentController
 from . import theme
+from .file_drop import FileDropMixin
 from .inline_text_editor import InlineCanvasTextWidget
 from .tools import LINE_TOOLS, RECT_TOOLS, Tool, ToolState
 
@@ -140,8 +141,13 @@ class PageItem(QGraphicsItem):
         return QRectF(r.x() * z, r.y() * z, r.width() * z, r.height() * z)
 
 
-class PdfView(QGraphicsView):
-    """Ana görüntüleyici bileşeni."""
+class PdfView(FileDropMixin, QGraphicsView):
+    """Ana görüntüleyici bileşeni.
+
+    ``FileDropMixin`` şart: ``QGraphicsView`` sürükleme olaylarını kendi
+    viewport'unda tükettiği için, karışım olmadan belge alanına bırakılan
+    dosya ana pencereye hiç ulaşmaz.
+    """
 
     currentPageChanged = Signal(int)
     zoomChanged = Signal(float)
@@ -166,6 +172,7 @@ class PdfView(QGraphicsView):
         self.setDragMode(QGraphicsView.NoDrag)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
+        self._setup_file_drops()
 
         self._items: list[PageItem] = []
         self._zoom = 1.0
