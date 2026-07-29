@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __app_name__, __version__
-from ..core import exporter, page_ops, xfa
+from ..core import exporter, page_ops, xfa, xfa_render
 from ..core.document import PasswordRequired, PdfError
 from ..services.document_controller import DocumentController
 from ..services.settings import AppSettings
@@ -255,6 +255,8 @@ class MainWindow(QMainWindow):
         A("split", "PDF'i böl…", "split", None, self.split_dialog)
         A("watermark", "Filigran ekle…", "watermark", None, self.watermark_dialog)
         # XFA yalnızca öyle bir form açıldığında etkinleşir (bkz. _check_xfa_form)
+        A("xfa_render", "Formu görüntüle (XFA)", "text", None,
+          self.render_xfa_form).setEnabled(False)
         A("xfa_form", "Etkileşimli formu doldur…", "text", None,
           self.xfa_form_dialog).setEnabled(False)
         A("export_images", "Görsele dönüştür…", "export_image", None, self.export_images_dialog)
@@ -364,6 +366,8 @@ class MainWindow(QMainWindow):
             m_tools.addAction(self.tool_actions[tool])
         m_tools.addSeparator()
         m_tools.addAction(a["watermark"])
+        m_tools.addSeparator()
+        m_tools.addAction(a["xfa_render"])
         m_tools.addAction(a["xfa_form"])
         m_tools.addSeparator()
         m_tools.addAction(a["merge"])
@@ -655,6 +659,7 @@ class MainWindow(QMainWindow):
         self.info_label.setText("")
         self._xfa_form = None
         self._actions["xfa_form"].setEnabled(False)
+        self._actions["xfa_render"].setEnabled(False)
         self.show_message("Belge kapatıldı.")
 
     def _on_document_replaced(self) -> None:
@@ -692,23 +697,69 @@ class MainWindow(QMainWindow):
         self._xfa_form = self.current_xfa_form()
         var = self._xfa_form is not None and bool(self._xfa_form.editable_fields)
         self._actions["xfa_form"].setEnabled(var)
+        self._actions["xfa_render"].setEnabled(var)
         if not var or not self._xfa_form.dynamic:
             return
 
         sayi = len(self._xfa_form.editable_fields)
         self.show_message(
             f"Bu bir etkileşimli XFA formu — {sayi} alan bulundu. "
-            "Araçlar ▸ Etkileşimli formu doldur…"
+            "Araçlar ▸ Formu görüntüle."
         )
-        QMessageBox.information(
-            self, "Etkileşimli form",
+
+        kutu = QMessageBox(self)
+        kutu.setWindowTitle("Etkileşimli form")
+        kutu.setIcon(QMessageBox.Information)
+        kutu.setTextFormat(Qt.RichText)
+        kutu.setText(
             "<h3>Bu belge bir XFA formu</h3>"
             "<p>Form içeriği sayfaya değil, belgeye gömülü bir XML şablonuna "
             "kayıtlıdır; bu yüzden sayfada yalnızca Adobe uyarısı görünür. "
             "Bu, dosyanın bozuk olduğu anlamına gelmez.</p>"
-            f"<p><b>{sayi} doldurulabilir alan</b> okundu. "
-            "<i>Araçlar ▸ Etkileşimli formu doldur…</i> ile doldurup "
-            "kaydedebilirsiniz; dosya Adobe Reader'da dolu olarak açılır.</p>",
+            f"<p><b>{sayi} doldurulabilir alan</b> okundu. Formu görüntülenebilir "
+            "ve doldurulabilir bir PDF'e dönüştürebilirim.</p>"
+        )
+        btn_goruntule = kutu.addButton("Formu Görüntüle", QMessageBox.AcceptRole)
+        kutu.addButton("Şimdilik Kalsın", QMessageBox.RejectRole)
+        kutu.setDefaultButton(btn_goruntule)
+        kutu.exec()
+        if kutu.clickedButton() is btn_goruntule:
+            self.render_xfa_form()
+
+    def render_xfa_form(self) -> None:
+        """XFA şablonunu çizip görüntülenebilir bir belge olarak açar."""
+        form = self.current_xfa_form()
+        if form is None:
+            QMessageBox.information(
+                self, "Formu görüntüle",
+                "Bu belgede XFA formu bulunamadı.",
+            )
+            return
+
+        paketler = xfa.read_packets(self.controller.document.raw)
+        sablon = xfa.packet_data(self.controller.document.raw, paketler["template"])
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            veri = xfa_render.render_bytes(sablon, form.as_values())
+        except Exception as exc:  # noqa: BLE001 - olağandışı şablon
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(
+                self, "Formu görüntüle",
+                f"Form çizilemedi:\n{exc}\n\n"
+                "Alanları yine de Araçlar ▸ Etkileşimli formu doldur… "
+                "ile doldurabilirsiniz.",
+            )
+            return
+        finally:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+
+        kaynak = self.controller.document.display_name
+        self.controller.open_bytes(veri)
+        self.show_message(
+            f"{kaynak} formu görüntülenebilir PDF'e dönüştürüldü. "
+            "Alanları doldurup 'Farklı Kaydet' ile kaydedebilirsiniz."
         )
 
     def xfa_form_dialog(self) -> None:

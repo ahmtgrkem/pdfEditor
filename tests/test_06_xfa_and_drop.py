@@ -9,7 +9,7 @@ from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QApplication
 
-from app.core import xfa
+from app.core import xfa, xfa_render
 from app.ui.file_drop import dropped_files
 
 # Sürükleme olayları MIME verisinin ömrünü uzatmaz; referans tutulmazsa
@@ -220,6 +220,33 @@ class TestXfaOkuma:
         assert ulke.options == [("Türkiye", "TR"), ("Almanya", "DE")]
         d.close()
 
+    def test_onay_kutusu_sablon_degeriyle_isaretlenmez(self):
+        """Onay kutusunda ``<value>`` mevcut durum değil, "açık" değeridir.
+
+        Durum sayılırsa boş bir form bütün kutuları işaretli açar.
+        """
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            '<subform name="form"><field name="onay">'
+            "<ui><checkButton/></ui>"
+            "<value><text>C</text></value>"
+            "<items><text>C</text></items>"
+            "</field></subform></template>"
+        ).encode()
+        alan = xfa.extract_fields(sablon)[0]
+        assert alan.type == "check"
+        assert alan.value == "", "şablon değeri kutuyu işaretlememeli"
+        assert alan.options == [("C", "C")], "açık değeri korunmalı"
+
+    def test_metin_alani_sablon_degerini_korur(self):
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            '<subform name="form"><field name="ad">'
+            "<ui><textEdit/></ui><value><text>Varsayılan</text></value>"
+            "</field></subform></template>"
+        ).encode()
+        assert xfa.extract_fields(sablon)[0].value == "Varsayılan"
+
     def test_bozuk_sablon_cokertmez(self):
         assert xfa.extract_fields(b"<template bozuk") == []
         assert xfa.extract_fields(b"") == []
@@ -269,6 +296,157 @@ class TestXfaYazma:
         d.close()
 
 
+class TestXfaCizim:
+    """Şablonun görüntülenebilir PDF'e dönüştürülmesi."""
+
+    def test_olcu_birimleri_puntoya_cevrilir(self):
+        assert xfa_render.parse_measure("10mm") == pytest.approx(28.346, abs=0.01)
+        assert xfa_render.parse_measure("1in") == 72.0
+        assert xfa_render.parse_measure("12pt") == 12.0
+        assert xfa_render.parse_measure("1cm") == pytest.approx(28.346, abs=0.01)
+        assert xfa_render.parse_measure("") == 0.0
+        assert xfa_render.parse_measure(None, 5.0) == 5.0
+        assert xfa_render.parse_measure("abc", 3.0) == 3.0
+
+    def test_yerlesim_sayfa_ve_kutu_uretir(self, xfa_pdf):
+        d = pymupdf.open(str(xfa_pdf))
+        sablon = xfa.packet_data(d, xfa.read_packets(d)["template"])
+        yerlesim = xfa_render.layout_template(sablon)
+        assert yerlesim.box_count == 4        # 3 doldurulabilir + 1 düğme
+        assert all(k.w > 0 and k.h > 0 for s in yerlesim.pages for k in s)
+        d.close()
+
+    def test_cizilen_pdf_widget_icerir(self, xfa_pdf):
+        d = pymupdf.open(str(xfa_pdf))
+        sablon = xfa.packet_data(d, xfa.read_packets(d)["template"])
+        cikti = xfa_render.render(sablon)
+        try:
+            assert cikti.page_count >= 1
+            adlar = {w.field_name for s in cikti for w in s.widgets()}
+            # Düğme doldurulabilir olmadığı için widget üretilmez.
+            assert any(a.endswith("ad") for a in adlar)
+            assert any(a.endswith("ulke") for a in adlar)
+            assert any(a.endswith("onay") for a in adlar)
+            assert not any(a.endswith("gonder") for a in adlar)
+        finally:
+            cikti.close()
+        d.close()
+
+    def test_etiketler_sayfaya_cizilir(self, xfa_pdf):
+        d = pymupdf.open(str(xfa_pdf))
+        sablon = xfa.packet_data(d, xfa.read_packets(d)["template"])
+        cikti = xfa_render.render(sablon)
+        try:
+            metin = "".join(s.get_text() for s in cikti)
+            # Boşluklar NBSP olarak çizilebildiği için normalleştirilir.
+            duz = metin.replace("\xa0", " ")
+            assert "Ad Soyad" in duz
+            assert "Ülke" in duz
+        finally:
+            cikti.close()
+        d.close()
+
+    def test_cizilen_belgede_xfa_kalmaz(self, xfa_pdf):
+        """Çıktı sıradan bir AcroForm PDF'i olmalı; XFA kalırsa Adobe
+        AcroForm alanlarını yok sayar ve form yine boş görünür."""
+        d = pymupdf.open(str(xfa_pdf))
+        sablon = xfa.packet_data(d, xfa.read_packets(d)["template"])
+        veri = xfa_render.render_bytes(sablon)
+        d.close()
+
+        yeni = pymupdf.open(stream=veri, filetype="pdf")
+        try:
+            assert xfa.is_xfa(yeni) is False
+            assert yeni.is_form_pdf
+        finally:
+            yeni.close()
+
+    def test_degerler_widgetlara_islenir(self, xfa_pdf):
+        d = pymupdf.open(str(xfa_pdf))
+        sablon = xfa.packet_data(d, xfa.read_packets(d)["template"])
+        cikti = xfa_render.render(sablon, {"form.Kisi.ad": "Görkem"})
+        try:
+            degerler = {w.field_name: w.field_value
+                        for s in cikti for w in s.widgets()}
+            assert degerler.get("form.Kisi.ad") == "Görkem"
+        finally:
+            cikti.close()
+        d.close()
+
+    def test_gizli_bolumler_varsayilan_olarak_cizilir(self):
+        """Dinamik XFA'da bölümler betikle açılır; betik çalıştırmadığımız
+        için gizliye uyulursa formun büyük bölümü kaybolur."""
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            '<subform name="form" layout="tb">'
+            '<subform name="Gizli" presence="hidden" w="100mm" h="20mm">'
+            '<field name="a" w="80mm" h="9mm">'
+            '<caption><value><text>Gizli alan</text></value></caption>'
+            "<ui><textEdit/></ui></field>"
+            "</subform></subform></template>"
+        ).encode()
+        assert xfa_render.layout_template(sablon).box_count == 1
+        assert xfa_render.layout_template(sablon, show_hidden=False).box_count == 0
+
+    def test_veri_tasiyici_alanlar_cizilmez(self):
+        """``presence="invisible"`` alanlar görünür widget'larla üst üste
+        binen iç veri taşıyıcılarıdır."""
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            '<subform name="form" layout="tb">'
+            '<field name="gorunur" w="80mm" h="9mm"><ui><textEdit/></ui></field>'
+            '<field name="tasiyici" presence="invisible" w="80mm" h="9mm">'
+            "<ui><textEdit/></ui></field>"
+            "</subform></template>"
+        ).encode()
+        yollar = [k.path for s in xfa_render.layout_template(sablon).pages for k in s]
+        assert any(y.endswith("gorunur") for y in yollar)
+        assert not any(y.endswith("tasiyici") for y in yollar)
+
+    def test_dokunulmamis_onay_kutulari_kapali_cizilir(self, xfa_pdf):
+        d = pymupdf.open(str(xfa_pdf))
+        sablon = xfa.packet_data(d, xfa.read_packets(d)["template"])
+        cikti = xfa_render.render(sablon)          # değer verilmedi
+        try:
+            onay = next(w for s in cikti for w in s.widgets()
+                        if w.field_name.endswith("onay"))
+            assert onay.field_value in (False, "Off"), "boş form işaretli açılmamalı"
+        finally:
+            cikti.close()
+        d.close()
+
+    def test_veriyle_gelen_onay_kutusu_isaretlenir(self, xfa_pdf):
+        d = pymupdf.open(str(xfa_pdf))
+        sablon = xfa.packet_data(d, xfa.read_packets(d)["template"])
+        cikti = xfa_render.render(sablon, {"form.Kisi.onay": "1"})
+        try:
+            onay = next(w for s in cikti for w in s.widgets()
+                        if w.field_name.endswith("onay"))
+            assert onay.field_value not in (False, "Off")
+        finally:
+            cikti.close()
+        d.close()
+
+    def test_kutular_sayfa_disina_tasmaz(self, xfa_pdf):
+        d = pymupdf.open(str(xfa_pdf))
+        sablon = xfa.packet_data(d, xfa.read_packets(d)["template"])
+        yerlesim = xfa_render.layout_template(sablon)
+        genislik = yerlesim.page_size[0]
+        for sayfa in yerlesim.pages:
+            for kutu in sayfa:
+                assert kutu.x + kutu.w <= genislik + 0.5, f"{kutu.path} taşıyor"
+        d.close()
+
+    def test_bozuk_sablon_cokertmez(self):
+        assert xfa_render.layout_template(b"<bozuk").box_count == 0
+        assert xfa_render.layout_template(b"").box_count == 0
+        belge = xfa_render.render(b"<bozuk")
+        try:
+            assert belge.page_count >= 1      # boş da olsa geçerli PDF
+        finally:
+            belge.close()
+
+
 class TestXfaArayuz:
     def test_xfa_acilinca_menu_etkinlesir(self, qapp, window, xfa_pdf, monkeypatch):
         monkeypatch.setattr(
@@ -315,3 +493,27 @@ class TestXfaArayuz:
         assert diyalog.values() == {}
         diyalog.close()
         d.close()
+
+    def test_formu_goruntule_belgeyi_degistirir(self, qapp, window, xfa_pdf):
+        window.open_path(str(xfa_pdf))
+        qapp.processEvents()
+        assert window.controller.page_count == 1
+
+        window.render_xfa_form()
+        qapp.processEvents()
+
+        ham = window.controller.document.raw
+        assert xfa.is_xfa(ham) is False, "çizilen belgede XFA kalmamalı"
+        assert ham.is_form_pdf, "alanlar AcroForm widget'ı olmalı"
+        adlar = {w.field_name for s in ham for w in s.widgets()}
+        assert any(a.endswith("ad") for a in adlar)
+
+    def test_goruntulenen_form_adsiz_acilir(self, qapp, window, xfa_pdf):
+        """Çizilen belge diskteki dosyanın karşılığı değildir; yol atanırsa
+        "Kaydet" özgün XFA dosyasının üzerine yazar."""
+        window.open_path(str(xfa_pdf))
+        qapp.processEvents()
+        window.render_xfa_form()
+        qapp.processEvents()
+        assert window.controller.document.path is None
+        assert window.controller.document.is_dirty is True

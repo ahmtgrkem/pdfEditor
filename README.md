@@ -13,7 +13,8 @@ uygulaması. Python 3.10+, PySide6 (Qt 6) ve PyMuPDF üzerine kurulu; temiz katm
 ### Görüntüleyici
 - Dosyayı pencerenin **herhangi bir yerine** sürükleyip bırakarak açma
   (belge alanı ve küçük resim paneli dâhil)
-- **XFA (etkileşimli XML) formu** desteği — bkz.
+- **XFA (etkileşimli XML) formu** desteği: "Adobe Reader gerekli" uyarısı
+  yerine formun kendisi çizilir ve doldurulabilir — bkz.
   [XFA formları](#xfa-etkileşimli-form-desteği)
 - Ctrl + fare tekerleği ile yakınlaştırma, sayfaya sığdır / genişliğe sığdır
 - Tek sayfa, sürekli kaydırma ve çift sayfa (kitap) görünümleri
@@ -85,6 +86,7 @@ pdfEditor/
 │   │   ├── exporter.py       # Görsel/metin dışa aktarma, sıkıştırma, şifreleme
 │   │   ├── fonts.py          # Unicode (Türkçe) yazı tipi çözümleme
 │   │   ├── xfa.py            # XFA form alanlarını okuma/doldurma
+│   │   ├── xfa_render.py     # XFA şablonunu görüntülenebilir PDF'e çizme
 │   │   └── history.py        # Anlık görüntü tabanlı geri al/yinele
 │   ├── services/             # Qt köprüsü
 │   │   ├── document_controller.py   # UI ↔ core arasındaki tek kapı
@@ -169,22 +171,48 @@ Bu bir bozukluk değildir: form içeriği gerçekten sayfada yoktur. Adobe Reade
 dışında hemen hiçbir görüntüleyici (MuPDF, Chrome, Edge, Preview) bu şablonu
 çizemez.
 
-**Uygulamanın yaklaşımı:** şablonu çizmeye çalışmaz — XFA tam bir yerleşim
-motoru ve betik dili gerektirir. Bunun yerine formu *kullanılabilir* kılar:
+Uygulama iki yol sunar.
 
-- Açılışta XFA tespit edilir ve kullanıcı bilgilendirilir (aksi hâlde dosya
-  açılamamış sanılır)
-- Alanlar, etiketleri, türleri ve açılır liste seçenekleri şablondan okunur
-- *Araçlar ▸ Etkileşimli formu doldur…* alanları bölümlere ayrılmış bir
-  formda sunar (metin, sayı, tarih, onay kutusu, açılır liste)
-- Girilen değerler `datasets` paketine yazılır — Adobe verileri zaten oradan
-  okuduğu için **kaydedilen dosya Adobe Reader'da dolu olarak açılır**
+### 1. Formu görüntüle (önerilen)
 
-Alan yolları altform hiyerarşisini izler (`form.PADORV2.Identification.orgName`)
-ve `datasets` ağacına aynı yapıda yazılır.
+*Araçlar ▸ Formu görüntüle (XFA)* — dosya açılırken de teklif edilir.
 
-**Sınır:** formun görsel yerleşimi çizilmez; alanlar liste hâlinde sunulur.
-Dinamik XFA'nın betik kuralları (koşullu alanlar, hesaplamalar) çalıştırılmaz.
+Şablondaki yerleşim hesaplanır, metin/çizgi/görseller sayfaya işlenir ve
+alanlar gerçek **AcroForm widget'ları** olarak eklenir. Sonuç, **her
+görüntüleyicide açılan ve doldurulabilen sıradan bir PDF**'tir. Uygulanan
+XFA yerleşim alt kümesi:
+
+| Düzen | Davranış |
+|---|---|
+| `position` (varsayılan) | Çocuklar kendi `x`/`y` değerleriyle |
+| `tb` | Yukarıdan aşağıya akış, taşınca yeni sayfa |
+| `table` / `row` | Satırlar dikey, hücreler yatay |
+
+Etiket yerleşimi (`caption placement`) ve genişliği (`reserve`) izlenir;
+onay kutularında etiket sağda, kutu solda durur.
+
+Üretilen belge **adsız** açılır — diskteki dosyanın karşılığı olmadığı için
+"Kaydet" özgün XFA dosyasının üzerine yazmaz, "Farklı Kaydet" sorar.
+
+### 2. Alanları doğrudan doldur
+
+*Araçlar ▸ Etkileşimli formu doldur…* alanları bölümlere ayrılmış bir
+iletişim kutusunda sunar. Girilen değerler özgün belgenin `datasets`
+paketine yazılır — Adobe verileri zaten oradan okuduğu için **kaydedilen
+dosya Adobe Reader'da dolu olarak açılır**. Alan yolları altform
+hiyerarşisini izler (`form.PADORV2.Identification.orgName`).
+
+### Sınırlar ve kabuller
+
+- **Betik kuralları çalıştırılmaz** (koşullu alanlar, hesaplamalar).
+- Dinamik XFA'da bölümler betikle açıldığı için `presence="hidden"`
+  bölümler **yine de çizilir**; buna uyulsaydı bu formun 11 alt formunun
+  tamamı (kimlik, profil, hedef gruplar…) kaybolurdu. Görünür bir metinle
+  örtüşen gizli kopyalar elenir, böylece başlıklar üst üste binmez.
+- `presence="invisible"` alanlar çizilmez: bunlar ekranda yer kaplamayan
+  iç veri taşıyıcılarıdır (dosya eki içeriği gibi).
+- Onay kutusunda şablondaki `<value>` mevcut durum değil, kutu
+  işaretlenince kaydedilecek değerdir; durum yalnızca form verisinden gelir.
 
 ---
 

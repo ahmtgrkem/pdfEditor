@@ -175,13 +175,23 @@ class PdfDocument:
             self._generation += 1
             self._page_revs.clear()
 
-    def open_stream(self, data: bytes, path: str | None = None) -> None:
-        """Bellek içindeki PDF baytlarından belge açar (undo/redo için)."""
+    def open_stream(self, data: bytes, path: str | None = None,
+                    detach: bool = False) -> None:
+        """Bellek içindeki PDF baytlarından belge açar (undo/redo için).
+
+        Varsayılan olarak mevcut yol korunur: geri al/yinele aynı dosya
+        üzerinde çalışır. ``detach=True`` yolu **siler** — içerik artık
+        diskteki dosyanın karşılığı değildir (ör. XFA'dan üretilmiş sürüm) ve
+        "Kaydet" özgün dosyanın üzerine yazmamalıdır.
+        """
         with self._lock:
             doc = fitz.open(stream=data, filetype="pdf")
             self.close(keep_path=True)
             self._doc = doc
-            if path is not None:
+            if detach:
+                self._path = None
+                self._password = None
+            elif path is not None:
                 self._path = path
             self._generation += 1
             self._page_revs.clear()

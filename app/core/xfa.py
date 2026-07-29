@@ -212,15 +212,21 @@ def extract_fields(template: bytes) -> list[XfaField]:
             if etiket == "field":
                 if not ad:
                     continue
+                tur = _ui_type_of(cocuk)
+                # Onay kutularında şablondaki ``<value>`` mevcut durum DEĞİL,
+                # kutu işaretlenince kaydedilecek "açık değeri"dir (radyo
+                # gruplarında grubun alacağı değer). Durum sayılırsa boş bir
+                # form bile bütün kutuları işaretli açar.
+                ilk_deger = "" if tur == "check" else _text_of(
+                    next((v for v in cocuk if _local(v.tag) == "value"), None)
+                )
                 alanlar.append(
                     XfaField(
                         name=ad,
                         path=".".join(yol + [ad]),
                         caption=_caption_of(cocuk),
-                        type=_ui_type_of(cocuk),
-                        value=_text_of(
-                            next((v for v in cocuk if _local(v.tag) == "value"), None)
-                        ),
+                        type=tur,
+                        value=ilk_deger,
                         options=_options_of(cocuk),
                         tooltip=cocuk.get("hAlign", ""),
                     )

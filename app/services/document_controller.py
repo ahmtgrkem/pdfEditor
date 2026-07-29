@@ -79,6 +79,23 @@ class DocumentController(QObject):
         self.dirtyChanged.emit(False)
         self.historyChanged.emit()
 
+    def open_bytes(self, data: bytes, title: str = "") -> None:
+        """Bellekteki PDF baytlarını **adsız** belge olarak açar.
+
+        Yol atanmaz: bu belge diskteki bir dosyanın karşılığı değildir
+        (ör. XFA formundan üretilen görüntülenebilir sürüm). Böylece
+        "Kaydet" doğrudan üzerine yazmak yerine "Farklı Kaydet" sorar ve
+        kullanıcının özgün dosyası korunur.
+        """
+        self.renderer.clear()
+        self.document.open_stream(data, detach=True)
+        self.document.mark_dirty(structural=True)
+        self.history.clear()
+        self._current_page = 0
+        self.documentOpened.emit("")
+        self.dirtyChanged.emit(True)
+        self.historyChanged.emit()
+
     def create_empty(self) -> None:
         self.renderer.clear()
         self.document.new_empty()

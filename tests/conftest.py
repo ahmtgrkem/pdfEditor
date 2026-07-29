@@ -79,6 +79,14 @@ def silence_dialogs(monkeypatch):
         monkeypatch.setattr(QMessageBox, name, record_message(name))
     monkeypatch.setattr(QMessageBox, "question", record_message("question"))
 
+    # Örnek olarak kurulan kutular (özel düğmeli QMessageBox) statik metotları
+    # kullanmaz; ``exec`` susturulmazsa test modal pencerede süresiz bekler.
+    def blocked_exec(self):
+        calls["message"].append(("exec", self.windowTitle(), self.text()))
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "exec", blocked_exec)
+
     def blocked_file(*args, **kwargs):
         calls["file"].append(args)
         return ("", "")
