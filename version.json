@@ -1,9 +1,9 @@
 {
-    "version":  "1.0.0",
-    "download_url":  "https://github.com/ahmtgrkem/pdfEditor/releases/download/v1.0.0/AGY_PDF_Editor_v1.0.0_Setup.exe",
+    "version":  "1.0.1",
+    "download_url":  "https://github.com/ahmtgrkem/pdfEditor/releases/download/v1.0.1/AGY_PDF_Editor_v1.0.1_Setup.exe",
     "mandatory":  false,
-    "release_notes":  "- İlk sürüm.\n- Canlı metin düzenleyici, açıklama araçları, sayfa işlemleri.\n- Otomatik güncelleme servisi.",
+    "release_notes":  "## Dinamik XFA formları artık çalışıyor\n\nAB hibe başvuruları gibi kurumsal formlar içeriklerini sayfada değil, gömülü\nbir XML şablonunda taşır ve davranışlarını JavaScript ile tanımlar. Önceki\nsürüm bu şablonu tek seferlik bir görüntüye çeviriyordu: form görünüyor ama\nçalışmıyordu. Artık şablon gerçek bir motorda çalıştırılıyor.\n\n- **Seçime bağlı bölümler açılıyor** — \"Lead applicant\" seçilince kimlik,\n  profil, mali veri ve diğer bölümler beliriyor; sayfa sayısı anında\n  güncelleniyor.\n- **Tablo satırları** `+` / `-` düğmeleriyle ekleniyor ve siliniyor.\n- **Bağlı açılır listeler** doluyor — ülke seçimi hukuki biçim listesini, o da\n  kategori listesini besliyor.\n- **Alan doğrulama** çalışıyor: hatalı e-posta ya da tarih uyarı verip alanı\n  temizliyor; kaydetmeden önce eksik zorunlu alanlar kırmızıya alınıyor.\n- **Dosya ekleri**: \"Attach\" düğmeleri dosya seçtiriyor, dosya adı forma\n  yazılıyor.\n- **Kaydetme** değerleri belgenin form verisine yazıyor; dosya XFA olarak\n  kalıyor ve Adobe/Foxit\u0027te dolu açılıyor. Yeniden açıldığında hem değerler\n  hem de seçime bağlı bölümler geri geliyor.\n- **Doldurulmuş formu PDF\u0027e aktarma** (*Araçlar* menüsü): ekranda ne\n  görünüyorsa o basılıyor — açılmış bölümler, eklenmiş satırlar ve girilen\n  değerlerle.\n- Etiketlerin alanlarla **dikey hizası** düzeltildi.\n\n## Açamadığı dosya kalmasın\n\n- Bozuk çapraz başvuru tablosu (xref) olan PDF\u0027ler onarılarak açılıyor.\n- Başlığından önce çöp taşıyan dosyalar (indirme artığı, e-posta üstbilgisi)\n  açılıyor.\n- Uzantısı yanlış dosyalar içeriğine bakılarak tanınıyor.\n- Görsel, EPUB ve XPS dosyaları PDF\u0027e çevrilerek açılıyor; \"Kaydet\" kaynak\n  dosyanın üzerine yazmıyor, \"Farklı Kaydet\" soruyor.\n- Tanınmayan içerik artık çökmeden, anlaşılır bir iletiyle reddediliyor.\n\n## Not: kurulum boyutu\n\nDinamik XFA formlarını çalıştırmak gömülü bir tarayıcı motoru gerektiriyor;\nkurulum dosyası bu yüzden 45 MB\u0027tan 133 MB\u0027a çıktı. Gereksiz geliştirici\naraçları kaynakları (83 MB) pakete alınmadı.",
     "release_date":  "2026-07-29",
-    "size":  44832560,
-    "sha256":  "5c5559c49090015254645b4b12148f0e2a2457e10a318d011ee8073339f0d03f"
+    "size":  139033119,
+    "sha256":  "3785a487c719546dca79d64de841388d507759d0e3344ebe9f84d346e18ca6d7"
 }
