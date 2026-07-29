@@ -257,6 +257,8 @@ class MainWindow(QMainWindow):
         # XFA yalnızca öyle bir form açıldığında etkinleşir (bkz. _check_xfa_form)
         A("xfa_render", "Formu görüntüle (XFA)", "text", None,
           self.render_xfa_form).setEnabled(False)
+        A("xfa_render_all", "Formu tüm bölümleriyle görüntüle", "text", None,
+          self.render_xfa_form_all).setEnabled(False)
         A("xfa_form", "Etkileşimli formu doldur…", "text", None,
           self.xfa_form_dialog).setEnabled(False)
         A("export_images", "Görsele dönüştür…", "export_image", None, self.export_images_dialog)
@@ -368,6 +370,7 @@ class MainWindow(QMainWindow):
         m_tools.addAction(a["watermark"])
         m_tools.addSeparator()
         m_tools.addAction(a["xfa_render"])
+        m_tools.addAction(a["xfa_render_all"])
         m_tools.addAction(a["xfa_form"])
         m_tools.addSeparator()
         m_tools.addAction(a["merge"])
@@ -660,6 +663,7 @@ class MainWindow(QMainWindow):
         self._xfa_form = None
         self._actions["xfa_form"].setEnabled(False)
         self._actions["xfa_render"].setEnabled(False)
+        self._actions["xfa_render_all"].setEnabled(False)
         self.show_message("Belge kapatıldı.")
 
     def _on_document_replaced(self) -> None:
@@ -698,6 +702,7 @@ class MainWindow(QMainWindow):
         var = self._xfa_form is not None and bool(self._xfa_form.editable_fields)
         self._actions["xfa_form"].setEnabled(var)
         self._actions["xfa_render"].setEnabled(var)
+        self._actions["xfa_render_all"].setEnabled(var)
         if not var or not self._xfa_form.dynamic:
             return
 
@@ -718,16 +723,30 @@ class MainWindow(QMainWindow):
             "Bu, dosyanın bozuk olduğu anlamına gelmez.</p>"
             f"<p><b>{sayi} doldurulabilir alan</b> okundu. Formu görüntülenebilir "
             "ve doldurulabilir bir PDF'e dönüştürebilirim.</p>"
+            "<p><i>Tüm bölümleriyle</i>, özgün belgede yalnızca seçime göre "
+            "açılan bölümleri de çizer.</p>"
         )
         btn_goruntule = kutu.addButton("Formu Görüntüle", QMessageBox.AcceptRole)
+        btn_tumu = kutu.addButton("Tüm Bölümleriyle", QMessageBox.AcceptRole)
         kutu.addButton("Şimdilik Kalsın", QMessageBox.RejectRole)
         kutu.setDefaultButton(btn_goruntule)
         kutu.exec()
         if kutu.clickedButton() is btn_goruntule:
             self.render_xfa_form()
+        elif kutu.clickedButton() is btn_tumu:
+            self.render_xfa_form(show_hidden=True)
 
-    def render_xfa_form(self) -> None:
-        """XFA şablonunu çizip görüntülenebilir bir belge olarak açar."""
+    def render_xfa_form_all(self) -> None:
+        """Betikle açılan bölümler dâhil, formun tamamını çizer."""
+        self.render_xfa_form(show_hidden=True)
+
+    def render_xfa_form(self, show_hidden: bool = False) -> None:
+        """XFA şablonunu çizip görüntülenebilir bir belge olarak açar.
+
+        ``show_hidden`` özgün görünümden ayrılır: Adobe/Foxit'te yalnızca
+        seçime göre açılan bölümler de çizilir, böylece form tek seferde
+        doldurulabilir.
+        """
         form = self.current_xfa_form()
         if form is None:
             QMessageBox.information(
@@ -741,7 +760,9 @@ class MainWindow(QMainWindow):
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            veri = xfa_render.render_bytes(sablon, form.as_values())
+            veri = xfa_render.render_bytes(
+                sablon, form.as_values(), show_hidden=show_hidden
+            )
         except Exception as exc:  # noqa: BLE001 - olağandışı şablon
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(
@@ -757,8 +778,9 @@ class MainWindow(QMainWindow):
 
         kaynak = self.controller.document.display_name
         self.controller.open_bytes(veri)
+        kapsam = "tüm bölümleriyle " if show_hidden else ""
         self.show_message(
-            f"{kaynak} formu görüntülenebilir PDF'e dönüştürüldü. "
+            f"{kaynak} formu {kapsam}görüntülenebilir PDF'e dönüştürüldü. "
             "Alanları doldurup 'Farklı Kaydet' ile kaydedebilirsiniz."
         )
 

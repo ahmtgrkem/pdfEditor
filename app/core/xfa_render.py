@@ -115,6 +115,12 @@ class Layout:
 
     pages: list[list[Box]] = dataclass_field(default_factory=list)
     page_size: tuple[float, float] = DEFAULT_PAGE
+    #: ``pageArea`` süslemeleri (arka plan görseli, logo, sayfa numarası).
+    #: Her sayfada, içeriğin **altına** çizilir.
+    background: list[Box] = dataclass_field(default_factory=list)
+    #: Altbilgideki gömülü alan kimliği -> ``"current"`` | ``"total"``.
+    #: Sayfa numarası alanları betikle hesaplandığı için burada karşılanır.
+    page_field_ids: dict[str, str] = dataclass_field(default_factory=dict)
 
     @property
     def box_count(self) -> int:
@@ -345,11 +351,56 @@ class _Layouter:
 
         return ogeler
 
+    # -- pageArea süslemeleri ------------------------------------------
+    def _page_furniture(self) -> tuple[list[Box], dict[str, str]]:
+        """``pageArea`` içindeki çizimler: arka plan görseli, logo, altbilgi.
+
+        Bunlar kök alt formun dışındadır; yalnızca alt formu gezmek arka plan
+        deseninin ve AB bayrağının tamamen kaybolmasına yol açar.
+
+        Ayrıca sayfa sayacı alanlarının kimlikleri toplanır: altbilgi metni
+        bunlara ``xfa:embed`` ile atıfta bulunur ve değerleri betikle
+        hesaplandığı için çizim sırasında yerine konur.
+        """
+        kutular: list[Box] = []
+        sayac_kimlikleri: dict[str, str] = {}
+        for sayfa_alani in self.root.iter():
+            if _local(sayfa_alani.tag) != "pageArea":
+                continue
+            for cocuk in sayfa_alani:
+                if _local(cocuk.tag) == "field":
+                    # Sayaçlar doldurulabilir alan değildir; yalnızca
+                    # altbilgide gösterilmek üzere kimlikleri kaydedilir.
+                    ad = cocuk.get("name")
+                    kimlik = cocuk.get("id")
+                    if kimlik and ad in ("CurrentPage", "PageCount"):
+                        sayac_kimlikleri[kimlik] = (
+                            "current" if ad == "CurrentPage" else "total"
+                        )
+                    continue
+                if _local(cocuk.tag) != "draw" or not _is_visible(cocuk):
+                    continue
+                kutular.append(
+                    Box(
+                        node=cocuk, kind="draw",
+                        x=parse_measure(cocuk.get("x")),
+                        y=parse_measure(cocuk.get("y")),
+                        w=parse_measure(cocuk.get("w")) or self.page_w,
+                        h=parse_measure(cocuk.get("h")) or _natural_height(cocuk),
+                        path=cocuk.get("name") or "",
+                    )
+                )
+            break           # tek ana sayfa şablonu destekleniyor
+        return kutular, sayac_kimlikleri
+
     # -- 3) sayfalara dağıtım -----------------------------------------
     def run(self) -> Layout:
+        arka_plan, sayac_kimlikleri = self._page_furniture()
         kok_sf = next((c for c in self.root if _local(c.tag) == "subform"), None)
         if kok_sf is None:
-            return Layout(pages=[[]], page_size=(self.page_w, self.page_h))
+            return Layout(pages=[[]], page_size=(self.page_w, self.page_h),
+                          background=arka_plan,
+                          page_field_ids=sayac_kimlikleri)
 
         sayfalar: list[list[Box]] = [[]]
         imlec = self.ca_y
@@ -375,10 +426,11 @@ class _Layouter:
                     sayfalar[-1].append(k)
             imlec += yukseklik
 
-        return Layout(pages=sayfalar, page_size=(self.page_w, self.page_h))
+        return Layout(pages=sayfalar, page_size=(self.page_w, self.page_h),
+                      background=arka_plan, page_field_ids=sayac_kimlikleri)
 
 
-def layout_template(template: bytes, show_hidden: bool = True) -> Layout:
+def layout_template(template: bytes, show_hidden: bool = False) -> Layout:
     """Şablonu çözümleyip yerleşimi hesaplar."""
     if not template:
         return Layout(pages=[[]])
@@ -392,6 +444,62 @@ def layout_template(template: bytes, show_hidden: bool = True) -> Layout:
 # ======================================================================
 # Çizim
 # ======================================================================
+#: Zengin metinde başka bir alanın değerini gömen öznitelik
+#: (``xfa-data`` ad alanı; :mod:`app.core.xfa` ile aynı sabit).
+_EMBED_ATTR = "{http://www.xfa.org/schema/xfa-data/1.0/}embed"
+
+
+def _embedded_text(node: ET.Element, values: dict[str, str]) -> str:
+    """Zengin metni ``xfa:embed`` referanslarını çözerek düzleştirir.
+
+    Altbilgi ``Page <embed CurrentPage> of <embed PageCount>`` biçimindedir;
+    referanslar çözülmezse sayfada "Page of" yazar.
+    """
+    parcalar: list[str] = []
+    for alt in node.iter():
+        kimlik = alt.get(_EMBED_ATTR)
+        if kimlik:
+            parcalar.append(values.get(kimlik.lstrip("#"), ""))
+        if alt.text and alt.text.strip():
+            parcalar.append(alt.text.strip())
+        if alt.tail and alt.tail.strip():
+            parcalar.append(alt.tail.strip())
+    return re.sub(r"\s+", " ", " ".join(p for p in parcalar if p)).strip()
+
+
+def _draw_text_for_page(node: ET.Element, page_values: dict[str, str]) -> str:
+    """Çizim metni; sayfa sayaçları varsa yerine konmuş hâliyle."""
+    for cocuk in node:
+        if _local(cocuk.tag) != "value":
+            continue
+        for icerik in cocuk:
+            if _local(icerik.tag) == "exData" and page_values:
+                if any(a.get(_EMBED_ATTR) for a in icerik.iter()):
+                    return _embedded_text(icerik, page_values)
+    return _node_text(node)
+
+
+def _fit_image_rect(rect: fitz.Rect, stream: bytes) -> fitz.Rect:
+    """Görseli oranını koruyarak kutuya sığdırır, **üst ortaya** yaslar.
+
+    PyMuPDF oranı korurken görseli kutuda dikey olarak ortalar. XFA
+    yerleşiminde görsel kutusu çoğunlukla gerçek görselden yüksektir; ortalama
+    yapılınca görsel aşağı kayar ve altındaki başlığın üzerine biner.
+    """
+    try:
+        with fitz.open(stream=stream) as gorsel:
+            en, boy = gorsel[0].rect.width, gorsel[0].rect.height
+    except Exception:  # noqa: BLE001 - tanınmayan biçim
+        return rect
+    if en <= 0 or boy <= 0:
+        return rect
+
+    olcek = min(rect.width / en, rect.height / boy)
+    yeni_en, yeni_boy = en * olcek, boy * olcek
+    sol = rect.x0 + (rect.width - yeni_en) / 2
+    return fitz.Rect(sol, rect.y0, sol + yeni_en, rect.y0 + yeni_boy)
+
+
 def _node_image(node: ET.Element) -> bytes | None:
     for cocuk in node:
         if _local(cocuk.tag) != "value":
@@ -487,6 +595,22 @@ def _ui_type(node: ET.Element) -> str:
     return "text"
 
 
+def _is_round_button(node: ET.Element) -> bool:
+    """``checkButton shape="round"`` -> radyo düğmesi.
+
+    Yuvarlak onay kutuları XFA'da birbirini dışlayan seçim (radyo) demektir;
+    kare kutu olarak çizilirse kullanıcı birden çok seçenek işaretlenebilir
+    sanır.
+    """
+    for cocuk in node:
+        if _local(cocuk.tag) != "ui":
+            continue
+        for torun in cocuk:
+            if _local(torun.tag) == "checkButton":
+                return (torun.get("shape") or "square").lower() == "round"
+    return False
+
+
 def _options(node: ET.Element) -> list[tuple[str, str]]:
     gorunen: list[str] = []
     kaydedilen: list[str] = []
@@ -525,22 +649,104 @@ def _insert_text(page, rect: fitz.Rect, text: str, node: ET.Element,
             return
 
 
-def _draw_borders(page, rect: fitz.Rect, node: ET.Element) -> None:
-    """Görünür kenarlıkları çizer (gizli olanlar atlanır)."""
-    for kenarlik in node:
-        if _local(kenarlik.tag) != "border":
+def _apply_margin(rect: fitz.Rect, node: ET.Element) -> fitz.Rect:
+    """``<margin>`` iç boşluklarını uygular.
+
+    XFA'da alan kutusu, içeriğin çizildiği alandan bu kadar geniştir.
+    Uygulanmazsa bitişik alanlar birbirine yapışır ve tek bir blok gibi
+    görünür — özgün belgede aralarında ince bir boşluk vardır.
+    """
+    for cocuk in node:
+        if _local(cocuk.tag) != "margin":
             continue
-        for kenar in kenarlik:
-            if _local(kenar.tag) != "edge":
-                continue
-            if kenar.get("presence") == "hidden":
-                return
-            kalinlik = parse_measure(kenar.get("thickness"), 0.5)
-            try:
-                page.draw_rect(rect, color=(0.45, 0.45, 0.45),
-                               width=max(kalinlik, 0.3))
-            except Exception:  # noqa: BLE001
-                pass
+        sol = parse_measure(cocuk.get("leftInset"))
+        sag = parse_measure(cocuk.get("rightInset"))
+        ust = parse_measure(cocuk.get("topInset"))
+        alt = parse_measure(cocuk.get("bottomInset"))
+        daraltilmis = fitz.Rect(
+            rect.x0 + sol, rect.y0 + ust, rect.x1 - sag, rect.y1 - alt
+        )
+        # Boşluklar kutudan büyükse özgün dikdörtgen korunur.
+        if daraltilmis.width > 1 and daraltilmis.height > 1:
+            return daraltilmis
+        return rect
+    return rect
+
+
+def _parse_color(node: ET.Element | None, default=(0.35, 0.35, 0.35)):
+    """``<color value="r,g,b"/>`` -> 0-1 aralığında RGB."""
+    if node is None:
+        return default
+    for cocuk in node:
+        if _local(cocuk.tag) != "color":
+            continue
+        parcalar = (cocuk.get("value") or "").split(",")
+        if len(parcalar) != 3:
+            continue
+        try:
+            return tuple(min(max(int(p), 0), 255) / 255.0 for p in parcalar)
+        except ValueError:
+            return default
+    return default
+
+
+def _border_node(node: ET.Element) -> ET.Element | None:
+    """Çizilecek kenarlık düğümü.
+
+    XFA'da iki ayrı kenarlık olabilir: ``ui/<düzenleyici>/border`` görünen
+    kutuyu, ``field/border`` ise doğrulama vurgusunu tanımlar (bu formda
+    kırmızı). Görsel olarak geçerli olan ``ui`` altındakidir; yoksa
+    düğümün kendi kenarlığına düşülür.
+    """
+    for cocuk in node:
+        if _local(cocuk.tag) != "ui":
+            continue
+        for duzenleyici in cocuk:
+            for torun in duzenleyici:
+                if _local(torun.tag) == "border":
+                    return torun
+    for cocuk in node:
+        if _local(cocuk.tag) == "border":
+            return cocuk
+    return None
+
+
+def _draw_borders(page, rect: fitz.Rect, node: ET.Element) -> None:
+    """XFA kenar modeline göre kenarlık çizer.
+
+    ``border`` altında tek ``edge`` varsa dört kenara da uygulanır; dört
+    ``edge`` varsa sırası **üst, sağ, alt, sol**\'dur. Bu form alanlarının
+    çoğunda yalnızca alt kenar görünür — Foxit/Adobe'de gördüğünüz alt
+    çizgi stili buradan gelir. Kenar kenar çizilmezse alanlar kutu gibi
+    görünür ve özgün tasarımdan uzaklaşır.
+    """
+    kenarlik = _border_node(node)
+    if kenarlik is None:
+        return
+    kenarlar = [k for k in kenarlik if _local(k.tag) == "edge"]
+    if not kenarlar:
+        return
+
+    x0, y0, x1, y1 = rect
+    if len(kenarlar) == 1:
+        kenarlar = kenarlar * 4
+    kenarlar = (kenarlar + kenarlar[-1:] * 4)[:4]
+
+    cizgiler = (
+        ((x0, y0), (x1, y0)),        # üst
+        ((x1, y0), (x1, y1)),        # sağ
+        ((x0, y1), (x1, y1)),        # alt
+        ((x0, y0), (x0, y1)),        # sol
+    )
+    for kenar, (bas, son) in zip(kenarlar, cizgiler):
+        if kenar.get("presence") in ("hidden", "inactive"):
+            continue
+        kalinlik = parse_measure(kenar.get("thickness"), 0.5)
+        try:
+            page.draw_line(fitz.Point(*bas), fitz.Point(*son),
+                           color=_parse_color(kenar),
+                           width=max(min(kalinlik, 2.0), 0.3))
+        except Exception:  # noqa: BLE001 - geçersiz koordinat
             return
 
 
@@ -552,6 +758,10 @@ _WIDGET_TYPES = {
     "check": fitz.PDF_WIDGET_TYPE_CHECKBOX,
     "choice": fitz.PDF_WIDGET_TYPE_COMBOBOX,
 }
+
+#: Onay kutusu/radyo widget'ının kenar uzunluğu — XFA'da alan kutusu
+#: etiketiyle birlikte tanımlandığı için tıklama alanı satır boyunca uzar.
+_TOGGLE_SIZE = 4.2 * _MM
 
 
 def _add_widget(page, rect: fitz.Rect, node: ET.Element, path: str,
@@ -567,15 +777,20 @@ def _add_widget(page, rect: fitz.Rect, node: ET.Element, path: str,
     aile, boyut, kalin = _font_of(node)
     fontname, _dosya = fonts.resolve(aile, bold=kalin)
 
+    if widget_turu == fitz.PDF_WIDGET_TYPE_CHECKBOX and _is_round_button(node):
+        widget_turu = fitz.PDF_WIDGET_TYPE_RADIOBUTTON
+
     w = fitz.Widget()
     w.rect = rect
     w.field_type = widget_turu
     w.field_name = path or (node.get("name") or "alan")
-    w.fill_color = (0.96, 0.96, 1.0)
-    w.border_color = (0.55, 0.58, 0.68)
-    w.border_width = 0.6
+    # Alanın kendi kenarlığı sayfaya çizildiği için widget'a ikinci bir
+    # çerçeve eklenmez; aksi hâlde alt çizgi stili kutuya dönüşür.
+    w.fill_color = (0.93, 0.94, 0.99)
+    w.border_width = 0
 
-    if widget_turu == fitz.PDF_WIDGET_TYPE_CHECKBOX:
+    if widget_turu in (fitz.PDF_WIDGET_TYPE_CHECKBOX,
+                       fitz.PDF_WIDGET_TYPE_RADIOBUTTON):
         # Yalnızca veri, kutunun "açık" değerine eşitse işaretli çizilir.
         # Boş dize kapalı demektir (bkz. app.core.xfa: şablondaki <value>
         # onay kutusunda durum değil, açık değeridir).
@@ -636,20 +851,45 @@ def _overlaps_any(box: Box, others: list[Box]) -> bool:
 
 
 def render(template: bytes, values: dict[str, str] | None = None,
-           show_hidden: bool = True) -> fitz.Document:
+           show_hidden: bool = False) -> fitz.Document:
     """Şablonu çizip yeni bir PDF belgesi döndürür.
 
     ``values`` verilirse alanlar dolu oluşturulur (yol -> değer).
     Sonuç belgede XFA yoktur; sıradan bir AcroForm PDF'idir.
+
+    ``show_hidden=True`` betikle açılan bölümleri de çizer: özgün görünüme
+    sadık kalmaz ama formun tamamını tek seferde doldurulabilir kılar.
     """
     yerlesim = layout_template(template, show_hidden=show_hidden)
     degerler = values or {}
     doc = fitz.open()
     genis, yuksek = yerlesim.page_size
 
-    for kutular in yerlesim.pages or [[]]:
+    toplam_sayfa = len(yerlesim.pages) or 1
+    for sayfa_no, kutular in enumerate(yerlesim.pages or [[]], start=1):
         sayfa = doc.new_page(width=genis, height=yuksek)
-        # Önce çizimler, sonra alanlar: widget'lar üstte kalsın.
+
+        # Altbilgideki sayaçlar betikle hesaplandığı için burada karşılanır.
+        sayac_degerleri = {
+            kimlik: str(sayfa_no if rol == "current" else toplam_sayfa)
+            for kimlik, rol in yerlesim.page_field_ids.items()
+        }
+
+        # 1) Sayfa süslemeleri (arka plan deseni, logo) her sayfada en altta.
+        for kutu in yerlesim.background:
+            gorsel = _node_image(kutu.node)
+            if gorsel:
+                try:
+                    sayfa.insert_image(_fit_image_rect(kutu.rect, gorsel),
+                                       stream=gorsel, overlay=False)
+                except Exception:  # noqa: BLE001 - bozuk görsel
+                    pass
+                continue
+            _insert_text(sayfa, kutu.rect,
+                         _draw_text_for_page(kutu.node, sayac_degerleri),
+                         kutu.node)
+
+        # 2) Önce çizimler, sonra alanlar: widget'lar üstte kalsın.
         for kutu in _visible_draws(kutular):
             gorsel = _node_image(kutu.node)
             if gorsel:
@@ -662,14 +902,49 @@ def render(template: bytes, values: dict[str, str] | None = None,
             _insert_text(sayfa, kutu.rect, _node_text(kutu.node), kutu.node)
 
         for kutu in [k for k in kutular if k.kind == "field"]:
-            etiket, ayrilan, yerlesim = _caption_of(kutu.node)
+            # DİKKAT: değişken adı ``yerlesim`` olamaz — dış kapsamdaki
+            # Layout nesnesini gölgeler ve ikinci sayfada çökertir.
+            etiket, ayrilan, etiket_yeri = _caption_of(kutu.node)
             alan_dikdortgen = kutu.rect
             if etiket and ayrilan > 0:
                 etiket_dik, alan_dikdortgen = _split_caption(
-                    kutu.rect, ayrilan, yerlesim
+                    kutu.rect, ayrilan, etiket_yeri
                 )
                 _insert_text(sayfa, etiket_dik, etiket, kutu.node,
                              color=(0.15, 0.15, 0.15))
+
+            alan_turu = _ui_type(kutu.node)
+
+            # Resim alanları (logo, bayrak) doldurulabilir değildir ama
+            # değerlerindeki görsel sayfanın parçasıdır; çizilmezse belgenin
+            # görünümü özgününden belirgin biçimde ayrılır.
+            if alan_turu == "image":
+                gorsel = _node_image(kutu.node)
+                if gorsel:
+                    hedef = _fit_image_rect(
+                        _apply_margin(kutu.rect, kutu.node), gorsel
+                    )
+                    try:
+                        sayfa.insert_image(hedef, stream=gorsel)
+                    except Exception:  # noqa: BLE001 - bozuk görsel
+                        pass
+                continue
+
+            alan_dikdortgen = _apply_margin(alan_dikdortgen, kutu.node)
+
+            # Onay kutusu/radyo: XFA kutusu etiketi de kapsadığı için
+            # satır boyunca uzar. Küçük bir kareye indirilir, yoksa
+            # tıklama alanı metnin üzerine taşar.
+            if alan_turu == "check":
+                merkez_y = (alan_dikdortgen.y0 + alan_dikdortgen.y1) / 2
+                kenar = min(_TOGGLE_SIZE, alan_dikdortgen.height or _TOGGLE_SIZE)
+                alan_dikdortgen = fitz.Rect(
+                    alan_dikdortgen.x0, merkez_y - kenar / 2,
+                    alan_dikdortgen.x0 + kenar, merkez_y + kenar / 2,
+                )
+            else:
+                _draw_borders(sayfa, alan_dikdortgen, kutu.node)
+
             _add_widget(
                 sayfa, alan_dikdortgen, kutu.node, kutu.path,
                 degerler.get(kutu.path, ""),
@@ -678,9 +953,10 @@ def render(template: bytes, values: dict[str, str] | None = None,
     return doc
 
 
-def render_bytes(template: bytes, values: dict[str, str] | None = None) -> bytes:
+def render_bytes(template: bytes, values: dict[str, str] | None = None,
+                 show_hidden: bool = False) -> bytes:
     """:func:`render` sonucunu bayt olarak verir."""
-    doc = render(template, values)
+    doc = render(template, values, show_hidden=show_hidden)
     try:
         return doc.tobytes(deflate=True, garbage=3)
     finally:

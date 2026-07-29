@@ -115,6 +115,33 @@ class TestDosyaBirakma:
 # ======================================================================
 # 6.2 XFA formları
 # ======================================================================
+def _yaz_xfa(path, template: bytes, datasets: bytes | None = None) -> None:
+    """Verilen şablonu taşıyan asgari bir XFA PDF'i yazar."""
+    if datasets is None:
+        datasets = (
+            '<xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/">'
+            '<xfa:data xfa:dataNode="dataGroup"/></xfa:datasets>'
+        ).encode("utf-8")
+
+    doc = pymupdf.open()
+    doc.new_page()
+    t_xref = doc.get_new_xref()
+    doc.update_object(t_xref, "<<>>")
+    doc.update_stream(t_xref, template)
+    d_xref = doc.get_new_xref()
+    doc.update_object(d_xref, "<<>>")
+    doc.update_stream(d_xref, datasets)
+
+    acro = doc.get_new_xref()
+    doc.update_object(
+        acro, f"<</Fields[]/XFA[(template){t_xref} 0 R(datasets){d_xref} 0 R]>>"
+    )
+    doc.xref_set_key(doc.pdf_catalog(), "AcroForm", f"{acro} 0 R")
+    doc.xref_set_key(doc.pdf_catalog(), "NeedsRendering", "true")
+    doc.save(str(path))
+    doc.close()
+
+
 @pytest.fixture
 def xfa_pdf(tmp_path):
     """İçinde küçük bir XFA paketi olan PDF üretir.
@@ -147,30 +174,8 @@ def xfa_pdf(tmp_path):
         "</field>"
         "</subform></subform></template>"
     ).encode("utf-8")
-    datasets = (
-        '<xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/">'
-        '<xfa:data xfa:dataNode="dataGroup"/></xfa:datasets>'
-    ).encode("utf-8")
-
-    doc = pymupdf.open()
-    doc.new_page()
-    t_xref = doc.get_new_xref()
-    doc.update_object(t_xref, "<<>>")
-    doc.update_stream(t_xref, sablon)
-    d_xref = doc.get_new_xref()
-    doc.update_object(d_xref, "<<>>")
-    doc.update_stream(d_xref, datasets)
-
-    acro = doc.get_new_xref()
-    doc.update_object(
-        acro, f"<</Fields[]/XFA[(template){t_xref} 0 R(datasets){d_xref} 0 R]>>"
-    )
-    doc.xref_set_key(doc.pdf_catalog(), "AcroForm", f"{acro} 0 R")
-    doc.xref_set_key(doc.pdf_catalog(), "NeedsRendering", "true")
-
     yol = tmp_path / "xfa.pdf"
-    doc.save(str(yol))
-    doc.close()
+    _yaz_xfa(yol, sablon)
     return yol
 
 
@@ -373,9 +378,12 @@ class TestXfaCizim:
             cikti.close()
         d.close()
 
-    def test_gizli_bolumler_varsayilan_olarak_cizilir(self):
-        """Dinamik XFA'da bölümler betikle açılır; betik çalıştırmadığımız
-        için gizliye uyulursa formun büyük bölümü kaybolur."""
+    def test_gizli_bolumler_varsayilan_olarak_cizilmez(self):
+        """Özgün görünüm esas alınır: Adobe/Foxit gizli bölümleri göstermez.
+
+        ``show_hidden=True`` bunları da çizer — özgününe sadık değildir ama
+        formun tamamını tek seferde doldurulabilir kılar.
+        """
         sablon = (
             '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
             '<subform name="form" layout="tb">'
@@ -385,8 +393,8 @@ class TestXfaCizim:
             "<ui><textEdit/></ui></field>"
             "</subform></subform></template>"
         ).encode()
-        assert xfa_render.layout_template(sablon).box_count == 1
-        assert xfa_render.layout_template(sablon, show_hidden=False).box_count == 0
+        assert xfa_render.layout_template(sablon).box_count == 0
+        assert xfa_render.layout_template(sablon, show_hidden=True).box_count == 1
 
     def test_veri_tasiyici_alanlar_cizilmez(self):
         """``presence="invisible"`` alanlar görünür widget'larla üst üste
@@ -436,6 +444,112 @@ class TestXfaCizim:
             for kutu in sayfa:
                 assert kutu.x + kutu.w <= genislik + 0.5, f"{kutu.path} taşıyor"
         d.close()
+
+    def test_sayfa_susleri_pagearea_dan_cizilir(self):
+        """Arka plan görseli ve altbilgi kök alt formun dışında, ``pageArea``
+        içindedir; yalnızca alt form gezilirse tamamen kaybolur."""
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            "<subform name='form' layout='tb'><pageSet><pageArea name='P1'>"
+            "<medium stock='a4' short='210mm' long='297mm'/>"
+            "<contentArea x='10mm' y='10mm' w='190mm' h='270mm'/>"
+            "<draw name='Altbilgi' x='20mm' y='280mm' w='60mm' h='6mm'>"
+            "<value><text>Alt bilgi</text></value></draw>"
+            "</pageArea></pageSet>"
+            "<field name='a' w='80mm' h='9mm'><ui><textEdit/></ui></field>"
+            "</subform></template>"
+        ).encode()
+        yerlesim = xfa_render.layout_template(sablon)
+        assert len(yerlesim.background) == 1
+        assert yerlesim.background[0].path == "Altbilgi"
+
+        cikti = xfa_render.render(sablon)
+        try:
+            assert "Alt bilgi" in cikti[0].get_text().replace("\xa0", " ")
+        finally:
+            cikti.close()
+
+    def test_cok_sayfali_form_cizilir(self):
+        """Etiketli alanlar ikinci sayfaya taştığında da çizim sürmeli.
+
+        Etiket yerleşimi değişkeni bir kez ``Layout`` nesnesini gölgeleyip
+        ikinci sayfada çökertmişti.
+        """
+        alanlar = "".join(
+            f"<field name='a{i}' w='150mm' h='20mm'>"
+            f"<caption reserve='40mm'><value><text>Etiket {i}</text></value></caption>"
+            "<ui><textEdit/></ui></field>"
+            for i in range(30)
+        )
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            "<subform name='form' layout='tb'><pageSet><pageArea name='P1'>"
+            "<medium stock='a4' short='210mm' long='297mm'/>"
+            "<contentArea x='10mm' y='10mm' w='190mm' h='250mm'/>"
+            "</pageArea></pageSet>" + alanlar + "</subform></template>"
+        ).encode()
+
+        yerlesim = xfa_render.layout_template(sablon)
+        assert len(yerlesim.pages) > 1, "içerik birden çok sayfaya yayılmalı"
+
+        cikti = xfa_render.render(sablon)
+        try:
+            assert cikti.page_count == len(yerlesim.pages)
+            toplam = sum(len(list(s.widgets())) for s in cikti)
+            assert toplam == 30
+        finally:
+            cikti.close()
+
+    def test_sayfa_numaralari_altbilgide_yerine_konur(self):
+        """Altbilgi ``Page <embed> of <embed>`` biçimindedir; referanslar
+        çözülmezse sayfada "Page of" yazar."""
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/"'
+            ' xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/">'
+            "<subform name='form' layout='tb'><pageSet><pageArea name='P1'>"
+            "<medium stock='a4' short='210mm' long='297mm'/>"
+            "<contentArea x='10mm' y='10mm' w='190mm' h='250mm'/>"
+            "<field name='CurrentPage' id='fldCur' presence='hidden'"
+            " x='20mm' y='280mm' w='20mm' h='6mm'><ui><numericEdit/></ui></field>"
+            "<field name='PageCount' id='fldTot' presence='hidden'"
+            " x='40mm' y='280mm' w='20mm' h='6mm'><ui><numericEdit/></ui></field>"
+            "<draw name='Alt' x='60mm' y='280mm' w='60mm' h='6mm'><value>"
+            "<exData contentType='text/html'><body><p>Page "
+            "<span xfa:embed='#fldCur'/> of <span xfa:embed='#fldTot'/>"
+            "</p></body></exData></value></draw>"
+            "</pageArea></pageSet>"
+            "<field name='a' w='80mm' h='9mm'><ui><textEdit/></ui></field>"
+            "</subform></template>"
+        ).encode()
+
+        yerlesim = xfa_render.layout_template(sablon)
+        assert yerlesim.page_field_ids == {"fldCur": "current", "fldTot": "total"}
+
+        cikti = xfa_render.render(sablon)
+        try:
+            metin = cikti[0].get_text().replace("\xa0", " ")
+            assert "Page 1 of 1" in metin
+        finally:
+            cikti.close()
+
+    def test_yuvarlak_onay_kutusu_radyo_olur(self):
+        """``shape="round"`` birbirini dışlayan seçim demektir."""
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            "<subform name='form'>"
+            "<field name='r' w='40mm' h='6mm'>"
+            "<ui><checkButton shape='round'/></ui></field>"
+            "<field name='k' w='40mm' h='6mm' y='10mm'>"
+            "<ui><checkButton/></ui></field>"
+            "</subform></template>"
+        ).encode()
+        cikti = xfa_render.render(sablon)
+        try:
+            turler = {w.field_name: w.field_type for s in cikti for w in s.widgets()}
+            assert turler["form.r"] == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON
+            assert turler["form.k"] == pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+        finally:
+            cikti.close()
 
     def test_bozuk_sablon_cokertmez(self):
         assert xfa_render.layout_template(b"<bozuk").box_count == 0
@@ -507,6 +621,41 @@ class TestXfaArayuz:
         assert ham.is_form_pdf, "alanlar AcroForm widget'ı olmalı"
         adlar = {w.field_name for s in ham for w in s.widgets()}
         assert any(a.endswith("ad") for a in adlar)
+
+    def test_tum_bolumler_secenegi_gizlileri_de_cizer(self, qapp, window, tmp_path):
+        gizli = tmp_path / "gizli.pdf"
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            '<subform name="form" layout="tb">'
+            '<field name="acik" w="80mm" h="9mm">'
+            "<caption><value><text>Açık</text></value></caption>"
+            "<ui><textEdit/></ui></field>"
+            '<subform name="Gizli" presence="hidden" w="100mm" h="20mm">'
+            '<field name="kapali" w="80mm" h="9mm">'
+            "<caption><value><text>Kapalı</text></value></caption>"
+            "<ui><textEdit/></ui></field></subform>"
+            "</subform></template>"
+        ).encode()
+        _yaz_xfa(gizli, sablon)
+
+        window.open_path(str(gizli))
+        qapp.processEvents()
+        window.render_xfa_form()                   # özgün görünüm
+        qapp.processEvents()
+        adlar = {w.field_name for s in window.controller.document.raw
+                 for w in s.widgets()}
+        assert any(a.endswith("acik") for a in adlar)
+        assert not any(a.endswith("kapali") for a in adlar)
+
+        # Çizilen belge "kirli" sayılır; kaydetme sorusu açmayı iptal eder.
+        window.controller.document.mark_clean()
+        assert window.open_path(str(gizli)) is True
+        qapp.processEvents()
+        window.render_xfa_form(show_hidden=True)   # tüm bölümler
+        qapp.processEvents()
+        adlar = {w.field_name for s in window.controller.document.raw
+                 for w in s.widgets()}
+        assert any(a.endswith("kapali") for a in adlar)
 
     def test_goruntulenen_form_adsiz_acilir(self, qapp, window, xfa_pdf):
         """Çizilen belge diskteki dosyanın karşılığı değildir; yol atanırsa

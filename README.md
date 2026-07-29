@@ -179,20 +179,32 @@ Uygulama iki yol sunar.
 
 Şablondaki yerleşim hesaplanır, metin/çizgi/görseller sayfaya işlenir ve
 alanlar gerçek **AcroForm widget'ları** olarak eklenir. Sonuç, **her
-görüntüleyicide açılan ve doldurulabilen sıradan bir PDF**'tir. Uygulanan
-XFA yerleşim alt kümesi:
+görüntüleyicide açılan ve doldurulabilen sıradan bir PDF**'tir ve belgenin
+Adobe/Foxit'teki görünümünü hedefler:
 
-| Düzen | Davranış |
+| Öğe | Davranış |
 |---|---|
-| `position` (varsayılan) | Çocuklar kendi `x`/`y` değerleriyle |
+| `position` (varsayılan düzen) | Çocuklar kendi `x`/`y` değerleriyle |
 | `tb` | Yukarıdan aşağıya akış, taşınca yeni sayfa |
 | `table` / `row` | Satırlar dikey, hücreler yatay |
-
-Etiket yerleşimi (`caption placement`) ve genişliği (`reserve`) izlenir;
-onay kutularında etiket sağda, kutu solda durur.
+| `pageArea` | Arka plan deseni, logo ve altbilgi her sayfaya çizilir |
+| `border` kenarları | Üst/sağ/alt/sol ayrı ayrı; çoğu alanda yalnızca alt kenar → alt çizgi stili |
+| `caption placement` / `reserve` | Etiket sol/sağ/üst/alt, ayrılan genişlikle |
+| `checkButton shape="round"` | Radyo düğmesi (kare kutu değil) |
+| `margin` iç boşlukları | Bitişik alanlar birbirine yapışmaz |
+| `imageEdit` alanları | Değerlerindeki görsel çizilir (logo, bayrak) |
+| Altbilgi `xfa:embed` | `Page <n> of <m>` sayaçları yerine konur |
 
 Üretilen belge **adsız** açılır — diskteki dosyanın karşılığı olmadığı için
 "Kaydet" özgün XFA dosyasının üzerine yazmaz, "Farklı Kaydet" sorar.
+
+### 1b. Tüm bölümleriyle görüntüle
+
+*Araçlar ▸ Formu tüm bölümleriyle görüntüle* — özgün belgede yalnızca
+seçime göre açılan (`presence="hidden"`) bölümleri de çizer. Görünüm
+özgününe sadık değildir ama formun tamamı tek seferde doldurulabilir.
+Örnek formda: özgün görünüm 1 sayfa / 5 alan, tüm bölümler 3 sayfa /
+66 alan.
 
 ### 2. Alanları doğrudan doldur
 
@@ -204,11 +216,13 @@ hiyerarşisini izler (`form.PADORV2.Identification.orgName`).
 
 ### Sınırlar ve kabuller
 
-- **Betik kuralları çalıştırılmaz** (koşullu alanlar, hesaplamalar).
-- Dinamik XFA'da bölümler betikle açıldığı için `presence="hidden"`
-  bölümler **yine de çizilir**; buna uyulsaydı bu formun 11 alt formunun
-  tamamı (kimlik, profil, hedef gruplar…) kaybolurdu. Görünür bir metinle
-  örtüşen gizli kopyalar elenir, böylece başlıklar üst üste binmez.
+- **Betik kuralları çalıştırılmaz** (koşullu alanlar, hesaplamalar). Özgün
+  belgede bir seçim yapılınca açılan bölümler kendiliğinden görünmez;
+  bunun için "tüm bölümleriyle" seçeneği vardır.
+- Yerleşim Adobe'nin çıktısıyla piksel birebir değildir; bölüm sırası ve
+  alan konumları doğru, boşluklar farklılaşabilir.
+- Görünür bir metinle örtüşen gizli kopyalar elenir (koşullu başlıklar
+  aynı yere iki kez yazılır, elenmezse üst üste biner).
 - `presence="invisible"` alanlar çizilmez: bunlar ekranda yer kaplamayan
   iç veri taşıyıcılarıdır (dosya eki içeriği gibi).
 - Onay kutusunda şablondaki `<value>` mevcut durum değil, kutu
