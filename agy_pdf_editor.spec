@@ -121,6 +121,14 @@ a.binaries = [
     if not os.path.basename(entry[0]).startswith(_UNWANTED_DLL)
 ]
 
+# WebEngine'in geliştirici araçları kaynakları 83 MB tutuyor ve uygulamada
+# DevTools açılmıyor. Çıkarıldığında form görünümü aynı çalışıyor (paketlenmiş
+# exe ile doğrulandı).
+a.datas = [
+    entry for entry in a.datas
+    if "qtwebengine_devtools_resources" not in os.path.basename(entry[0])
+]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
