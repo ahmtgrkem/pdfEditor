@@ -1,9 +1,9 @@
 {
-  "version": "1.0.0",
-  "download_url": "https://github.com/ahmtgrkem/pdfEditor/releases/download/v1.0.0/AGY_PDF_Editor_v1.0.0_Setup.exe",
-  "mandatory": false,
-  "release_notes": "- Canlı metin düzenleyici yeniden yazıldı (0 piksel hizalama, birebir punto).\n- Otomatik güncelleme servisi eklendi.",
-  "release_date": "2026-07-29",
-  "size": 0,
-  "sha256": ""
+    "version":  "1.0.0",
+    "download_url":  "https://github.com/ahmtgrkem/pdfEditor/releases/download/v1.0.0/AGY_PDF_Editor_v1.0.0_Setup.exe",
+    "mandatory":  false,
+    "release_notes":  "- İlk sürüm.\n- Canlı metin düzenleyici, açıklama araçları, sayfa işlemleri.\n- Otomatik güncelleme servisi.",
+    "release_date":  "2026-07-29",
+    "size":  44832560,
+    "sha256":  "5c5559c49090015254645b4b12148f0e2a2457e10a318d011ee8073339f0d03f"
 }
