@@ -409,6 +409,11 @@ class TestSessizKurulum:
         assert "/SILENT" in komut
         assert "/CLOSEAPPLICATIONS" in komut
         assert any(arg.startswith("/LOG=") for arg in komut)
+        # Kurulum sonrası uygulamayı geri açan bayrak. Restart Manager'ın
+        # /RESTARTAPPLICATIONS'ı Qt uygulamasını geri açmıyor (kaydolmuyor);
+        # kurulum betiği bu bayrağı görünce uygulamayı kendisi başlatır.
+        assert "/RESTARTAPP" in komut
+        assert "/RESTARTAPPLICATIONS" not in komut
         # Uygulama kapanınca kurulum ölmemeli
         assert kwargs.get("creationflags") or kwargs.get("start_new_session")
 

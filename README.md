@@ -97,10 +97,12 @@ pdfEditor/
 │   │   └── dialogs/          # Metin, imza, filigran, birleştir, böl, ...
 │   └── main.py               # Giriş noktası
 ├── assets/app.ico            # Uygulama simgesi
-├── packaging/pdfeditor.spec  # PyInstaller yapılandırması
-├── installer/pdf_editor.iss  # Inno Setup kurulum betiği
+├── agy_pdf_editor.spec       # PyInstaller yapılandırması
+├── AGY_PDF_Editor_Setup.iss  # Inno Setup kurulum betiği
 ├── tools/make_icon.py        # Simge üretici
 ├── build.ps1                 # exe + setup üreten tek komut
+├── release.ps1               # derle + GitHub Release + version.json yayını
+├── version.json              # Güncelleme bildirimi (canlı feed)
 ├── requirements.txt
 └── run.py                    # Geliştirme başlatıcısı
 ```
@@ -159,11 +161,20 @@ Uzak makinelerdeki kurulumlar kendini internet üzerinden günceller.
   → `version.json` arka plan `QThread`inde indirilir → yeni sürüm varsa bildirim
   diyaloğu → "Şimdi Güncelle" → `%TEMP%\AGYPDFEditorUpdate\` altına canlı
   ilerleme/hız göstergesiyle indirme → Inno Setup kurulumu
-  `/SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /NORESTART` ile ayrı süreç
-  olarak başlatılır → uygulama kapanır.
-- **Güvenlik:** kurulum dosyası yalnızca `https` üzerinden indirilir;
-  `version.json` içinde `sha256` verilmişse doğrulanır, eşleşmezse kurulum iptal
-  edilir. İndirme `.part` uzantısıyla yapılır, yarım dosya kurulum sanılmaz.
+  `/SILENT /CLOSEAPPLICATIONS /NORESTART /RESTARTAPP` ile ayrı süreç olarak
+  başlatılır → uygulama kapanır → kurulum biter → uygulama geri açılır.
+- **Kurulum sonrası yeniden başlatma:** Restart Manager'ın
+  `/RESTARTAPPLICATIONS` bayrağı kullanılmaz; yalnızca
+  `RegisterApplicationRestart` ile kaydolmuş uygulamaları geri açtığı için Qt
+  uygulaması kapalı kalıyordu. Bunun yerine `.iss` içindeki `[Run]` girdisi
+  `/RESTARTAPP` bayrağını görünce uygulamayı kendisi başlatır. Bayrak açıkça
+  istendiğinden toplu (SCCM/Intune) sessiz kurulumlarda uygulama açılmaz.
+- **Güvenlik:** kurulum dosyası yalnızca `https` üzerinden indirilir ve
+  `version.json` **geçerli bir `sha256` taşımak zorundadır** — özet eksikse
+  manifest baştan reddedilir, eşleşmezse indirilen dosya silinir. (Eksik özet
+  sessizce kabul edilseydi doğrulanmamış bir kurulum çalıştırılırdı; bayat CDN
+  önbelleği böyle bir manifest üretebiliyor.) İndirme `.part` uzantısıyla
+  yapılır, yarım dosya kurulum sanılmaz.
 - **Ayarlar:** `Yardım ▸ Açılışta güncelleme kontrol et` ile kapatılabilir;
   komut satırında `--no-update-check` de aynı işi görür. Kullanıcı bir sürümü
   atlarsa (zorunlu olmayan) o sürüm için bir daha sorulmaz.
@@ -235,8 +246,9 @@ Betik sırasıyla şunları yapar:
 1. `.venv-build` adında temiz bir sanal ortam kurar (yalnızca gerekli paketler —
    böylece pakete sistemdeki alakasız kütüphaneler karışmaz).
 2. `assets/app.ico` yoksa üretir.
-3. PyInstaller ile `dist/PDFEditor/PDFEditor.exe` (konsolsuz) oluşturur.
-4. Inno Setup varsa `dist/installer/PDF_Editor_Setup.exe` kurulumunu derler.
+3. PyInstaller ile `dist/AGY_PDF_Editor/AGY_PDF_Editor.exe` (konsolsuz) oluşturur.
+4. Inno Setup varsa `dist/installer/AGY_PDF_Editor_v<sürüm>_Setup.exe` kurulumunu
+   derler ve yanına `sha256` içeren bir `version.json` taslağı bırakır.
 
 Yalnızca tek bir adımı çalıştırmak için:
 
@@ -248,13 +260,40 @@ Yalnızca tek bir adımı çalıştırmak için:
 Elle yapmak isterseniz:
 
 ```powershell
-pyinstaller packaging\pdfeditor.spec --noconfirm --clean
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\pdf_editor.iss
+pyinstaller agy_pdf_editor.spec --noconfirm --clean
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" AGY_PDF_Editor_Setup.iss
 ```
 
 Kurulum dosyası masaüstü kısayolu, Başlat menüsü girdisi, kaldırma (uninstall)
 desteği ve isteğe bağlı `.pdf` dosya ilişkilendirmesi içerir. Yönetici hakkı
 gerektirmeden kullanıcı klasörüne de kurulabilir.
+
+---
+
+## Yeni sürüm yayınlama
+
+Kurulu uygulamalar `version.json`ı düzenli olarak yoklar; yeni sürüm görünce
+kullanıcıya bildirir, indirir, `sha256` ile doğrular ve sessizce kurar.
+
+```powershell
+# 1) Sürümü yükseltin: app/__init__.py -> __version__ = "1.0.1"
+# 2) Tek komutla yayınlayın
+.\release.ps1 -NotesFile .\notes.md
+```
+
+`release.ps1` derler, GitHub Release açıp kurulum dosyasını yükler,
+**erişilebilirliğini doğrular**, ancak ondan sonra `version.json`ı pushlar.
+Bu sıra kritiktir: manifest önce yayınlanırsa istemciler var olmayan bir
+dosyayı indirmeye çalışır. Yükleme doğrulanamazsa manifest hiç yayınlanmaz.
+
+Önizleme için `.\release.ps1 -Notes "deneme" -DryRun` hiçbir şey yayınlamaz.
+
+**Önkoşullar:** `gh auth login` ile giriş yapılmış olmalı ve
+`__update_repo__`daki depo **public** olmalıdır — private depoda hem manifest
+hem release eki kimlik doğrulaması ister, istemciler indiremez.
+
+Yayından sonra `raw.githubusercontent.com` önbelleği nedeniyle güncellemenin
+tüm istemcilere ulaşması birkaç dakika sürebilir.
 
 ---
 

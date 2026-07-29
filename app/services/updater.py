@@ -50,8 +50,15 @@ NETWORK_TIMEOUT = 15
 CHUNK_SIZE = 64 * 1024
 #: İlerleme sinyalinin en sık yayınlanma aralığı (saniye)
 PROGRESS_INTERVAL = 0.15
-#: Inno Setup sessiz kurulum parametreleri
-SILENT_INSTALL_ARGS = ("/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS", "/NORESTART")
+#: Inno Setup sessiz kurulum parametreleri.
+#:
+#: ``/RESTARTAPPLICATIONS`` **kullanılmaz**: Restart Manager yalnızca
+#: ``RegisterApplicationRestart`` ile kaydolmuş uygulamaları geri açar, Qt
+#: uygulaması bunu yapmadığı için kurulum sonrası uygulama kapalı kalıyordu
+#: (kurulum günlüğü "Attempting to restart applications" yazıp sessizce
+#: başarısız oluyor). Bunun yerine kurulum betiğindeki ``[Run]`` girdisi
+#: ``/RESTARTAPP`` görünce uygulamayı kendisi başlatır.
+SILENT_INSTALL_ARGS = ("/SILENT", "/CLOSEAPPLICATIONS", "/NORESTART", "/RESTARTAPP")
 #: İndirilen kurulumların saklandığı geçici alt dizin
 DOWNLOAD_DIRNAME = "AGYPDFEditorUpdate"
 

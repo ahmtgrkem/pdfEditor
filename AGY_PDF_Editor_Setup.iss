@@ -74,6 +74,29 @@ Root: HKA; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: string; V
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "AGY PDF Editor'ü Çalıştır"; Flags: nowait postinstall skipifsilent
+; Otomatik güncelleme: uygulama kendi kurulumunu /RESTARTAPP ile başlatır ve
+; kurulum bitince uygulamayı geri açar. Restart Manager'ın /RESTARTAPPLICATIONS
+; bayrağına güvenilemez; yalnızca RegisterApplicationRestart ile kaydolmuş
+; uygulamaları geri açar, Qt uygulaması kaydolmadığı için kapalı kalıyordu.
+; Bayrak açıkça istendiği için toplu (SCCM/Intune) sessiz kurulumlar etkilenmez.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: GuncellemeSonrasiBaslat
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
+
+[Code]
+{ Kurulum /RESTARTAPP ile mi çağrıldı? Yalnızca otomatik güncelleme akışı bu
+  bayrağı geçirir; elle ya da toplu dağıtımla yapılan sessiz kurulumlarda
+  uygulama kendiliğinden açılmaz. }
+function GuncellemeSonrasiBaslat: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/RESTARTAPP') = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
