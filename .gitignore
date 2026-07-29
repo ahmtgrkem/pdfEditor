@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ------------------------------------------------------------ sanal ortam
+.venv/
+.venv-build/
+venv/
+env/
+
+# --------------------------------------------------------- derleme çıktısı
+build/
+dist/
+*.spec.bak
+
+# Kurulum dosyaları GitHub Release'e yüklenir, depoya değil (onlarca MB).
+*.exe
+*.msi
+
+# ------------------------------------------------------------------- editör
+.vscode/
+.idea/
+*.swp
+
+# ---------------------------------------------------------- işletim sistemi
+# Depo OneDrive altında: desktop.ini ve Zone.Identifier kazayla eklenmesin.
+desktop.ini
+Thumbs.db
+.DS_Store
+*:Zone.Identifier
+
+# -------------------------------------------------------------------- gizli
+# Depo public; kimlik bilgisi taşıyabilecek her şey baştan dışarıda tutulur.
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+secrets.json
+
+# ------------------------------------------------------------------ günlük
+*.log
+
+# ------------------------------------------------------------- test/deneme
+# Bu bir PDF düzenleyici: elle test için klasöre atılan kişisel belgeler
+# kazayla yayınlanmasın. Depoya girmesi gereken bir PDF olursa:
+#     git add -f yol/dosya.pdf
+*.pdf
+notes.md

@@ -1,0 +1,8 @@
+# --- Runtime ---
+PySide6>=6.6.0          # Qt6 arayüz katmanı
+PyMuPDF>=1.24.0         # PDF render + annotation motoru (fitz)
+pypdf>=4.0.0            # Sayfa işlemleri / şifreleme yardımcıları
+Pillow>=10.0.0          # TIFF export, .ico üretimi
+
+# --- Build / Packaging (sadece geliştirme) ---
+pyinstaller>=6.0.0
