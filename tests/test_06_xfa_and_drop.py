@@ -532,6 +532,32 @@ class TestXfaCizim:
         finally:
             cikti.close()
 
+    def test_dikey_hizalama_metni_kaybetmez(self):
+        """``vAlign`` kaydırması kutuyu metne tam eşit bırakırsa
+        ``insert_textbox`` sığdıramaz ve etiket hiç çizilmez."""
+        sablon = (
+            '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">'
+            "<subform name='form' layout='tb'>"
+            "<field name='a' w='190mm' h='9mm'>"
+            "<para vAlign='bottom'/>"
+            "<caption reserve='52mm'><para vAlign='bottom'/>"
+            "<value><text>Contact person's name</text></value></caption>"
+            "<ui><textEdit/></ui></field>"
+            "<field name='b' w='190mm' h='6mm'>"
+            "<para vAlign='middle'/>"
+            "<caption reserve='40mm' placement='right'><para vAlign='middle'/>"
+            "<value><text>Lead applicant</text></value></caption>"
+            "<ui><checkButton/></ui></field>"
+            "</subform></template>"
+        ).encode()
+        cikti = xfa_render.render(sablon)
+        try:
+            metin = "".join(s.get_text() for s in cikti).replace("\xa0", " ")
+            assert "Contact person's name" in metin
+            assert "Lead applicant" in metin
+        finally:
+            cikti.close()
+
     def test_yuvarlak_onay_kutusu_radyo_olur(self):
         """``shape="round"`` birbirini dışlayan seçim demektir."""
         sablon = (

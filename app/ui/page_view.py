@@ -24,11 +24,15 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsView,
     QMenu,
+    QWidget,
 )
 
+from ..core import form_fields
+from ..core.form_fields import FormField
 from ..services.document_controller import DocumentController
 from . import theme
 from .file_drop import FileDropMixin
+from .form_widgets import FormChoiceEditor, FormTextEditor
 from .inline_text_editor import InlineCanvasTextWidget
 from .tools import LINE_TOOLS, RECT_TOOLS, Tool, ToolState
 
@@ -200,6 +204,15 @@ class PdfView(FileDropMixin, QGraphicsView):
         self._editing_info: dict | None = None
         #: Kutu dışına tıklayarak onaylandı — takip eden release yutulur
         self._just_committed_inline = False
+        #: Açık form alanı düzenleyicisi (metin/açılır liste)
+        self._form_editor: QWidget | None = None
+        #: Düzenlenen alan
+        self._form_field: FormField | None = None
+        #: İmleç şu an bir form alanının üzerinde mi
+        self._form_cursor_on = False
+        #: Form alanı üzerinde gezinirken imleç değişsin
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
 
         controller.renderer.pageReady.connect(self._on_page_ready)
         controller.documentReplaced.connect(self.rebuild)
@@ -500,7 +513,24 @@ class PdfView(FileDropMixin, QGraphicsView):
                 out.append(item.index)
         return out
 
+    def _reposition_form_editor(self) -> None:
+        """Kaydırma/yakınlaştırma sonrası düzenleyiciyi alanın üstünde tutar.
+
+        Yerinden kaymış bir düzenleyici, girilen değerin başka bir alana
+        yazılacağı izlenimi verir.
+        """
+        if self._form_editor is None or self._form_field is None:
+            return
+        item = next(
+            (i for i in self._items if i.index == self._form_field.page_index), None
+        )
+        if item is None:
+            self.close_form_editor()
+            return
+        self._place_form_editor(item, self._form_field)
+
     def _update_visible(self) -> None:
+        self._reposition_form_editor()
         if not self.controller.is_open:
             return
         dpr = self.devicePixelRatioF()
@@ -717,6 +747,99 @@ class PdfView(FileDropMixin, QGraphicsView):
         self._selection_rect = None
         self.viewport().update()
 
+    # ==================================================================
+    # Etkileşimli form alanları
+    # ==================================================================
+    def _form_field_at(self, item: PageItem, pt: QPointF) -> FormField | None:
+        """Sayfa noktasındaki düzenlenebilir form alanı."""
+        if not self.controller.is_open:
+            return None
+        try:
+            return form_fields.field_at(
+                self.controller.document, item.index, pt.x(), pt.y()
+            )
+        except Exception:  # noqa: BLE001 - bozuk/kapanan belge
+            return None
+
+    def _handle_form_click(self, item: PageItem, pt: QPointF) -> bool:
+        """Form alanına tıklamayı işler. ``True`` -> olay tüketildi."""
+        alan = self._form_field_at(item, pt)
+        if alan is None:
+            return False
+
+        if alan.is_toggle:
+            # Onay kutusu/radyo düzenleyici gerektirmez: tek tıkla çevrilir.
+            etiket = "Onay kutusu" if alan.type == "check" else "Seçim"
+            with self.controller.edit(etiket, page=item.index) as doc:
+                if not form_fields.toggle(doc, alan):
+                    self.controller.undo_silently()
+            return True
+
+        self._open_form_editor(item, alan)
+        return True
+
+    def _open_form_editor(self, item: PageItem, field: FormField) -> None:
+        """Alanın tam üzerine bir düzenleyici yerleştirir."""
+        self.close_form_editor()
+
+        if field.type in ("combo", "list") and field.options:
+            editor: QWidget = FormChoiceEditor(field, self.viewport())
+        else:
+            editor = FormTextEditor(field, self.viewport())
+
+        editor.committed.connect(
+            lambda deger, f=field: self._commit_form_editor(f, deger)
+        )
+        editor.cancelled.connect(self.close_form_editor)
+
+        self._form_editor = editor
+        self._form_field = field
+        self._place_form_editor(item, field)
+        editor.show()
+        editor.setFocus(Qt.MouseFocusReason)
+
+    def _place_form_editor(self, item: PageItem, field: FormField) -> None:
+        """Düzenleyiciyi alanın ekran karşılığına oturtur."""
+        if self._form_editor is None:
+            return
+        x0, y0, x1, y1 = field.rect
+        ust_sol = self.mapFromScene(
+            item.pos() + QPointF(x0 * self._zoom, y0 * self._zoom)
+        )
+        alt_sag = self.mapFromScene(
+            item.pos() + QPointF(x1 * self._zoom, y1 * self._zoom)
+        )
+        genislik = max(alt_sag.x() - ust_sol.x(), 40)
+        # Çok kısa alanlarda düzenleyici okunmaz olur; asgari yükseklik verilir.
+        yukseklik = max(alt_sag.y() - ust_sol.y(), 20)
+        self._form_editor.setGeometry(ust_sol.x(), ust_sol.y(), genislik, yukseklik)
+
+    def _commit_form_editor(self, field: FormField, value: str) -> None:
+        self.close_form_editor()
+        if value == field.value:
+            return
+        with self.controller.edit("Form alanı", page=field.page_index) as doc:
+            if not form_fields.set_value(doc, field.page_index, field.name, value):
+                self.controller.undo_silently()
+
+    def close_form_editor(self) -> None:
+        """Açık düzenleyiciyi **kaydetmeden** kapatır.
+
+        Önce ``cancel()`` çağrılır: ``hide()`` odak kaybı üretir, odak kaybı
+        da onaylama sayıldığı için işaretlenmezse iptal edilmiş değer yine
+        yazılır. (Başka bir yere tıklayarak onaylama zaten odak kaybıyla,
+        buraya gelmeden gerçekleşir.)
+        """
+        if self._form_editor is None:
+            return
+        editor, self._form_editor = self._form_editor, None
+        self._form_field = None
+        iptal = getattr(editor, "cancel", None)
+        if callable(iptal):
+            iptal()
+        editor.hide()
+        editor.deleteLater()
+
     # -- fare ----------------------------------------------------------
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MiddleButton or self._space_pan or self.tools.tool is Tool.HAND:
@@ -752,6 +875,16 @@ class PdfView(FileDropMixin, QGraphicsView):
             self.currentPageChanged.emit(item.index)
 
         pt = self._clamp_to_page(item, self._to_page_pt(item, scene_pos))
+
+        # Form alanları yalnızca seçim aracındayken etkileşimlidir; aksi hâlde
+        # alanın üzerine açıklama eklemek imkânsız olurdu.
+        if self.tools.tool is Tool.SELECT:
+            if self._form_editor is not None:
+                self.close_form_editor()
+            if self._handle_form_click(item, pt):
+                event.accept()
+                return
+
         self._drag_page = item
         self._drag_start = pt
         self._drag_current = pt
@@ -786,7 +919,33 @@ class PdfView(FileDropMixin, QGraphicsView):
             event.accept()
             return
 
+        self._update_form_cursor(event.position().toPoint())
         super().mouseMoveEvent(event)
+
+    def _update_form_cursor(self, vp_pos) -> None:
+        """Form alanının üzerinde imleci el/metin imlecine çevirir.
+
+        Tıklanabilir olduğu görsel olarak belli olmazsa kullanıcı alanların
+        yalnızca resim olduğunu düşünür.
+        """
+        if (self.tools.tool is not Tool.SELECT or self._panning
+                or not self.controller.is_open):
+            return
+        scene_pos = self.mapToScene(vp_pos)
+        item = self._item_at_scene(scene_pos)
+        alan = None
+        if item is not None:
+            alan = self._form_field_at(item, self._to_page_pt(item, scene_pos))
+        if alan is None:
+            if self._form_cursor_on:
+                self._form_cursor_on = False
+                self._sync_cursor()
+            return
+        if not self._form_cursor_on:
+            self._form_cursor_on = True
+        self.viewport().setCursor(
+            Qt.PointingHandCursor if alan.is_toggle else Qt.IBeamCursor
+        )
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if getattr(self, "_just_committed_inline", False):

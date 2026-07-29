@@ -11,6 +11,9 @@ uygulaması. Python 3.10+, PySide6 (Qt 6) ve PyMuPDF üzerine kurulu; temiz katm
 ## Özellikler
 
 ### Görüntüleyici
+- **Etkileşimli form alanları:** metin kutularına yazma, onay kutusu ve
+  radyo düğmelerini seçme, açılır listelerden seçim — bkz.
+  [Form alanları](#etkileşimli-form-alanları)
 - Dosyayı pencerenin **herhangi bir yerine** sürükleyip bırakarak açma
   (belge alanı ve küçük resim paneli dâhil)
 - **XFA (etkileşimli XML) formu** desteği: "Adobe Reader gerekli" uyarısı
@@ -86,6 +89,7 @@ pdfEditor/
 │   │   ├── page_ops.py       # Döndür/sil/ekle/sırala/birleştir/böl
 │   │   ├── exporter.py       # Görsel/metin dışa aktarma, sıkıştırma, şifreleme
 │   │   ├── fonts.py          # Unicode (Türkçe) yazı tipi çözümleme
+│   │   ├── form_fields.py    # AcroForm alanlarını okuma/yazma
 │   │   ├── xfa.py            # XFA form alanlarını okuma/doldurma
 │   │   ├── xfa_render.py     # XFA şablonunu görüntülenebilir PDF'e çizme
 │   │   └── history.py        # Anlık görüntü tabanlı geri al/yinele
@@ -97,6 +101,7 @@ pdfEditor/
 │   ├── ui/                   # Sunum katmanı
 │   │   ├── main_window.py    # Menüler, araç çubukları, tüm akışlar
 │   │   ├── file_drop.py      # Dosya sürükle-bırak (alt widget'lar için)
+│   │   ├── form_widgets.py   # Sayfa üzerinde form alanı düzenleyicileri
 │   │   ├── page_view.py      # Sayfa görüntüleyici ve etkileşimli araçlar
 │   │   ├── inline_text_editor.py    # Canlı (tuval üzeri) metin düzenleyici
 │   │   ├── theme.py          # Koyu/açık tema ve stil sayfası
@@ -157,6 +162,29 @@ her zoom ve punto değerinde yatayda **0.000 pt**, dikeyde **≤ 0.01 pt**'dir
 
 Metin onaylandıktan sonra araç otomatik olarak `Tool.SELECT`e döner; sayfaya
 tekrar tıklamak yeni kutu açmaz.
+
+---
+
+## Etkileşimli form alanları
+
+Doldurulabilir PDF'lerdeki (AcroForm) alanlar sayfa üzerinde **doğrudan
+kullanılır** — dışa aktarma ya da ayrı bir diyalog gerekmez:
+
+| Alan | Davranış |
+|---|---|
+| Metin | Tıklayınca alanın üzerinde düzenleyici açılır; Enter veya başka yere tıklamak onaylar, Esc iptal eder |
+| Onay kutusu | Tek tıkla çevrilir |
+| Radyo | Tek tıkla seçilir; aynı gruptakiler kendiliğinden boşa düşer, seçili olana basmak onu kapatmaz |
+| Açılır liste | Tıklayınca seçenekler açılır |
+
+Alan üzerinde imleç değişir (yazı imleci / el). Değişiklikler **geri
+alınabilir** (Ctrl+Z) ve belge "kaydedilmemiş" olarak işaretlenir.
+
+Form alanları yalnızca **seçim aracı** etkinken tıklanabilir; böylece bir
+alanın üzerine açıklama (vurgu, çizim, şekil) eklemek engellenmez.
+
+Sayfa döndürülmüşse alan konumları düzeltilir: widget dikdörtgenleri ham
+PDF uzayında saklanır ve döndürmeden etkilenmez.
 
 ---
 

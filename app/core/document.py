@@ -346,6 +346,19 @@ class PdfDocument:
                 return Rect(visual)
             return Rect(visual) * page.derotation_matrix
 
+    def to_view_rect(self, index: int, pdf: Rect) -> Rect:
+        """Ham PDF koordinatını görsel (döndürülmüş) uzaya çevirir.
+
+        :meth:`to_pdf_rect` işleminin tersidir. Annotation/widget
+        dikdörtgenleri PDF uzayında saklanır ve sayfa döndürmesinden
+        etkilenmez; ekranda doğru yerde göstermek için bu dönüşüm gerekir.
+        """
+        with self._lock:
+            page = self.raw.load_page(index)
+            if page.rotation == 0:
+                return Rect(pdf)
+            return Rect(pdf) * page.rotation_matrix
+
     def to_pdf_point(self, index: int, visual: Point) -> Point:
         with self._lock:
             page = self.raw.load_page(index)

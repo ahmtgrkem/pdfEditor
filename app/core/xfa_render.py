@@ -629,24 +629,77 @@ def _options(node: ET.Element) -> list[tuple[str, str]]:
     return list(zip(gorunen, kaydedilen))
 
 
+def _valign_of(node: ET.Element) -> str:
+    """``para vAlign`` — dikey hizalama (varsayılan ``top``)."""
+    for alt in node.iter():
+        if _local(alt.tag) != "para":
+            continue
+        return (alt.get("vAlign") or "top").lower()
+    return "top"
+
+
 def _insert_text(page, rect: fitz.Rect, text: str, node: ET.Element,
                  color=(0, 0, 0)) -> None:
-    """Metni kutuya sığdırır; sığmazsa puntoyu kademeli küçültür."""
+    """Metni kutuya sığdırır; sığmazsa puntoyu kademeli küçültür.
+
+    ``para vAlign`` izlenir. ``insert_textbox`` metni her zaman kutunun
+    üstüne yaslar; bu formdaki etiketlerin neredeyse tamamı ``middle``
+    olduğu için hizalanmazsa etiketler yanlarındaki onay kutusu/alan
+    hizasından yukarıda kalır.
+    """
     if not text or rect.is_empty:
         return
     aile, boyut, kalin = _font_of(node)
     fontname, fontfile = fonts.resolve(aile, bold=kalin)
     hiza = _align_of(node)
-    for deneme in (boyut, boyut * 0.85, boyut * 0.7, boyut * 0.55):
+    dikey = _valign_of(node)
+
+    def yaz(hedef: fitz.Rect, punto: float) -> bool:
         try:
-            artan = page.insert_textbox(
-                rect, text, fontname=fontname, fontfile=fontfile,
-                fontsize=deneme, color=color, align=hiza,
-            )
+            return page.insert_textbox(
+                hedef, text, fontname=fontname, fontfile=fontfile,
+                fontsize=punto, color=color, align=hiza,
+            ) >= 0
         except Exception:  # noqa: BLE001 - font/kutu uyuşmazlığı
+            return True             # yazılamıyorsa küçültmek de fayda etmez
+
+    for deneme in (boyut, boyut * 0.85, boyut * 0.7, boyut * 0.55):
+        kaydir = 0.0
+        if dikey in ("middle", "bottom"):
+            try:
+                yukseklik = _text_height(text, fontname, fontfile, deneme, rect.width)
+            except Exception:  # noqa: BLE001
+                yukseklik = deneme * 1.2
+            bosluk = max(rect.height - yukseklik, 0.0)
+            kaydir = bosluk / 2 if dikey == "middle" else bosluk
+            # Güvenlik payı: kaydırma kutuyu metne tam eşit bırakırsa
+            # ``insert_textbox`` sığdıramaz ve metin hiç çizilmez.
+            kaydir = min(kaydir, max(rect.height - yukseklik - 1.0, 0.0))
+
+        if kaydir > 0:
+            if yaz(fitz.Rect(rect.x0, rect.y0 + kaydir, rect.x1, rect.y1), deneme):
+                return
+            # Kaydırma yüzünden sığmadıysa hizalamadan vazgeç — metnin
+            # kaybolmasındansa üste yaslanması yeğdir.
+        if yaz(rect, deneme):
             return
-        if artan >= 0:
-            return
+
+
+def _text_height(text: str, fontname: str, fontfile: str | None,
+                 fontsize: float, width: float) -> float:
+    """Metnin verilen genişlikte kaplayacağı yükseklik (satır sarması dâhil)."""
+    font = fitz.Font(fontname=None if fontfile else fontname, fontfile=fontfile)
+    satir_yuksekligi = fontsize * 1.2
+    satir = 1
+    gecerli = 0.0
+    for kelime in text.split():
+        genislik = font.text_length(kelime + " ", fontsize=fontsize)
+        if gecerli + genislik > width and gecerli > 0:
+            satir += 1
+            gecerli = genislik
+        else:
+            gecerli += genislik
+    return satir * satir_yuksekligi
 
 
 def _apply_margin(rect: fitz.Rect, node: ET.Element) -> fitz.Rect:
