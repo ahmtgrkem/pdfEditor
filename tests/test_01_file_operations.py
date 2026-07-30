@@ -94,6 +94,52 @@ class TestExportFormats:
         doc.close()
         assert not opened.controller.is_dirty, "Kayıttan sonra kirli bayrağı kalkmalı"
 
+    def test_word_belgesi_olarak_kaydet(self, opened, tmp_path):
+        """Üretilen .docx geçerli bir OOXML paketi olmalı ve metni taşımalı."""
+        import xml.etree.ElementTree as ET
+        import zipfile
+
+        from app.core.docx_export import export_docx
+
+        hedef = tmp_path / "belge.docx"
+        export_docx(opened.controller.document, str(hedef))
+        assert hedef.exists() and hedef.stat().st_size > 0
+
+        with zipfile.ZipFile(hedef) as paket:
+            assert paket.testzip() is None, "ZIP bozuk olmamalı"
+            adlar = set(paket.namelist())
+            assert {"[Content_Types].xml", "_rels/.rels",
+                    "word/document.xml"} <= adlar
+            govde = paket.read("word/document.xml").decode("utf-8")
+            for parca in adlar:
+                if parca.endswith(".xml") or parca.endswith(".rels"):
+                    ET.fromstring(paket.read(parca))      # iyi biçimli mi
+
+        assert "Türkçe" in govde, "Türkçe karakterler korunmalı"
+        assert govde.count('w:type="page"') == 5, "Sayfa başına bir sayfa sonu"
+        assert "<w:sectPr>" in govde, "Sayfa ölçüsü tanımlanmalı"
+
+    def test_word_ciktisinda_metinsiz_sayfa_gorsel_olur(self, window, qapp, tmp_path):
+        """Taranmış sayfa boş geçilmemeli: sayfa görüntüsü gömülür."""
+        import zipfile
+
+        from app.core.docx_export import export_docx
+
+        bos = tmp_path / "bos.pdf"
+        doc = fitz.open()
+        doc.new_page()          # hiç metin yok
+        doc.save(str(bos))
+        doc.close()
+        assert window.open_path(str(bos)) is True
+
+        hedef = tmp_path / "bos.docx"
+        export_docx(window.controller.document, str(hedef))
+        with zipfile.ZipFile(hedef) as paket:
+            assert "word/media/image1.png" in paket.namelist()
+            iliski = paket.read("word/_rels/document.xml.rels").decode("utf-8")
+            assert "media/image1.png" in iliski
+            assert "<w:drawing>" in paket.read("word/document.xml").decode("utf-8")
+
     @pytest.mark.parametrize("fmt,uzanti", [("PNG", ".png"), ("JPG", ".jpg"),
                                             ("TIFF", ".tif"), ("BMP", ".bmp")])
     def test_gorsel_olarak_disa_aktar(self, opened, tmp_path, fmt, uzanti):

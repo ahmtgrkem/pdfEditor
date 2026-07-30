@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __app_name__, __version__
-from ..core import exporter, page_ops, xfa, xfa_render
+from ..core import docx_export, exporter, page_ops, xfa, xfa_render
 from ..core.document import PasswordRequired, PdfError
 from ..services.document_controller import DocumentController
 from ..services.settings import AppSettings
@@ -59,6 +59,8 @@ from .tools import LABELS, Tool, ToolState
 
 IMAGE_FILTER = "Görseller (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)"
 PDF_FILTER = "PDF dosyaları (*.pdf)"
+#: "Farklı kaydet" biçimleri. Word seçilirse belge kaydedilmez, dışa aktarılır.
+SAVE_AS_FILTER = "PDF dosyası (*.pdf);;Word belgesi (*.docx)"
 #: Açma iletişimi: uzantısı bozuk/farklı dosyalar da seçilebilsin. Uygulama
 #: biçimi içeriğe bakarak çözer (bkz. ``app.core.document.open_tolerant``).
 OPEN_FILTER = (
@@ -287,6 +289,7 @@ class MainWindow(QMainWindow):
         A("xfa_form", "Etkileşimli formu doldur…", "text", None,
           self.xfa_form_dialog).setEnabled(False)
         A("export_images", "Görsele dönüştür…", "export_image", None, self.export_images_dialog)
+        A("export_word", "Word olarak kaydet…", None, None, self.export_word_dialog)
         A("export_text", "Metin olarak kaydet…", None, None, self.export_text_dialog)
         A("compress", "Sıkıştır / optimize et…", "compress", None, self.compress_dialog)
         A("encrypt", "Parola koy…", "lock", None, self.encrypt_dialog)
@@ -335,6 +338,7 @@ class MainWindow(QMainWindow):
         m_file.addAction(a["save_as"])
         m_file.addSeparator()
         m_file.addAction(a["export_images"])
+        m_file.addAction(a["export_word"])
         m_file.addAction(a["export_text"])
         m_file.addAction(a["page_extract"])
         m_file.addSeparator()
@@ -638,7 +642,8 @@ class MainWindow(QMainWindow):
             "zoom_actual", "fit_page", "fit_width", "first", "prev", "next", "last",
             "goto", "rotate_cw", "rotate_ccw", "rotate_all_cw", "rotate_all_ccw",
             "page_add", "page_duplicate", "page_extract", "page_delete", "watermark",
-            "export_images", "export_text", "compress", "encrypt", "decrypt", "split",
+            "export_images", "export_text", "export_word", "compress", "encrypt",
+            "decrypt", "split",
         ):
             self._actions[key].setEnabled(has_doc)
         self._actions["page_delete"].setEnabled(has_doc and pages > 1)
@@ -659,6 +664,7 @@ class MainWindow(QMainWindow):
                 "rotate_all_ccw", "page_add", "page_duplicate", "page_extract",
                 "page_delete", "watermark", "export_images", "export_text",
                 "compress", "copy", "find", "find_next", "find_prev", "split",
+                "export_word",
             ):
                 self._actions[key].setEnabled(False)
             for action in self.tool_actions.values():
@@ -1193,9 +1199,19 @@ class MainWindow(QMainWindow):
         start = self.controller.path or os.path.join(
             self.settings.last_directory, "belge.pdf"
         )
-        path, _ = QFileDialog.getSaveFileName(self, "Farklı kaydet", start, PDF_FILTER)
+        path, secili = QFileDialog.getSaveFileName(
+            self, "Farklı kaydet", start, SAVE_AS_FILTER
+        )
         if not path:
             return False
+
+        if path.lower().endswith(".docx") or "docx" in secili.lower():
+            # Word'e aktarmak belgeyi PDF olarak **kaydetmez**; bu yüzden
+            # "kaydedildi" sözleşmesi (bkz. ``_confirm_discard``) korunur ve
+            # False döndürülür — kaydedilmemiş değişiklikler kaybolmasın.
+            self.export_word(path)
+            return False
+
         if not path.lower().endswith(".pdf"):
             path += ".pdf"
         try:
@@ -1564,6 +1580,37 @@ class MainWindow(QMainWindow):
         self.show_message(f"{len(written)} görsel kaydedildi.")
         self._offer_reveal(options.out_dir)
 
+    def export_word(self, path: str) -> bool:
+        """Belgeyi düzenlenebilir bir Word dosyasına aktarır."""
+        if not self.controller.is_open:
+            return False
+        if not path.lower().endswith(".docx"):
+            path += ".docx"
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            docx_export.export_docx(self.controller.document, path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Word'e aktar", f"Aktarılamadı:\n{exc}")
+            return False
+        finally:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+
+        self.settings.last_directory = os.path.dirname(path)
+        self.show_message(f"Word belgesi kaydedildi: {os.path.basename(path)}")
+        self._offer_open_external(path)
+        return True
+
+    def export_word_dialog(self) -> None:
+        if not self.controller.is_open:
+            return
+        base = os.path.splitext(self.controller.path or "belge")[0]
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Word olarak kaydet", f"{base}.docx", "Word belgesi (*.docx)"
+        )
+        if path:
+            self.export_word(path)
+
     def export_text_dialog(self) -> None:
         if not self.controller.is_open:
             return
@@ -1913,6 +1960,23 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.Yes:
             self.open_path(path)
+
+    def _offer_open_external(self, path: str) -> None:
+        """Dosyayı sistemin varsayılan programında açmayı önerir.
+
+        Word dosyasını kendi içinde açmak anlamsız; Word/varsayılan uygulama
+        devreye girmeli.
+        """
+        answer = QMessageBox.question(
+            self, "Dosya hazır",
+            f"{os.path.basename(path)} oluşturuldu. Şimdi açılsın mı?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
 
     def _offer_reveal(self, directory: str) -> None:
         if not directory or not os.path.isdir(directory):
