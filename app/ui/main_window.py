@@ -1780,8 +1780,21 @@ class MainWindow(QMainWindow):
         self.settings.update_skipped_version = ""
         self._start_update_download(info)
 
+    def _close_update_progress(self) -> None:
+        """İlerleme şeridini kapatır; her çıkış yolunda çağrılmalı."""
+        progress, self._update_progress = self._update_progress, None
+        if progress is not None:
+            progress.close()
+
     def _start_update_download(self, info) -> None:
         from .dialogs import UpdateProgressDialog
+
+        # Kaydedilmemiş değişiklik sorusu indirmeden **önce** sorulur: 128 MB
+        # indirdikten sonra sorulup vazgeçilmesi hem boşa iş hem de kullanıcıyı
+        # "kurulum başlatılıyor" ekranında bırakan bir akıştı.
+        if not self._confirm_discard():
+            self.show_message("Güncelleme iptal edildi.")
+            return
 
         progress = UpdateProgressDialog(info, self)
         self._update_progress = progress
@@ -1789,6 +1802,11 @@ class MainWindow(QMainWindow):
 
         updater.downloadProgress.connect(progress.update_progress)
         progress.cancelled.connect(updater.cancel_download)
+        #: Kullanıcı kendi iptal ettiyse hata kutusu gösterilmez.
+        kullanici_iptali = {"var": False}
+        progress.cancelled.connect(
+            lambda: kullanici_iptali.__setitem__("var", True)
+        )
 
         def finished(path: str) -> None:
             cleanup()
@@ -1797,7 +1815,13 @@ class MainWindow(QMainWindow):
 
         def failed(message: str) -> None:
             cleanup()
-            progress.close()
+            # Bayrak kapatmadan önce okunur: şeridi kapatmak da ``cancelled``
+            # yayıyor, sonra okunursa her hata "iptal" sayılırdı.
+            iptal = kullanici_iptali["var"]
+            self._close_update_progress()
+            if iptal:
+                self.show_message("Güncelleme indirmesi iptal edildi.")
+                return
             QMessageBox.warning(self, "Güncelleme", message)
             self.show_message(message)
 
@@ -1817,20 +1841,21 @@ class MainWindow(QMainWindow):
 
         if not updater.download(info):
             cleanup()
+            self._close_update_progress()
             return
         progress.show()
 
     def _install_update(self, installer_path: str) -> None:
         """Kurulumu başlatır ve uygulamayı güvenli şekilde kapatır."""
         if not self._confirm_discard():
+            self._close_update_progress()
             self.show_message(
                 "Güncelleme kurulmadı; kurulum dosyası indirildi: " + installer_path
             )
-            if self._update_progress is not None:
-                self._update_progress.close()
             return
 
         if not self.updater.install(installer_path):
+            self._close_update_progress()
             QMessageBox.warning(
                 self, "Güncelleme",
                 "Kurulum başlatılamadı. Dosyayı elle çalıştırabilirsiniz:\n"

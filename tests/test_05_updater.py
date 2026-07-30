@@ -24,6 +24,7 @@ from app.services.updater import (
     launch_installer,
     parse_version,
 )
+from conftest import pump
 
 MANIFEST = {
     "version": "2.5.0",
@@ -622,6 +623,55 @@ class TestGuncellemeArayuzu:
         dialog.btn_cancel.click()
         assert iptaller == [True]
         dialog.deleteLater()
+
+    def test_ilerleme_diyalogu_kapatilabilir(self, qapp, window):
+        """``close()`` şeridi gerçekten kapatmalı.
+
+        ``reject()`` yalnızca iptali tetikleyip ``super().reject()``
+        çağırmadığı için diyalog hiçbir yoldan kapanmıyordu: kullanıcı
+        "Kurulum başlatılıyor… / İptal ediliyor…" yazan pencerede kilitli
+        kalıyordu.
+        """
+        from app.ui.dialogs import UpdateProgressDialog
+
+        dialog = UpdateProgressDialog(UpdateInfo.from_dict(MANIFEST), window)
+        dialog.show()
+        pump(qapp)
+        dialog.set_installing()
+        dialog.close()
+        pump(qapp)
+        assert not dialog.isVisible(), "Şerit kapatılabilmeli"
+        dialog.deleteLater()
+
+    def test_kaydetmeyi_reddeden_kullanicida_serit_kapanir(self, qapp, window,
+                                                           monkeypatch, tmp_path):
+        """Kurulum onaylanmazsa ilerleme şeridi ekranda kalmamalı."""
+        from app.ui.dialogs import UpdateProgressDialog
+
+        dialog = UpdateProgressDialog(UpdateInfo.from_dict(MANIFEST), window)
+        dialog.show()
+        pump(qapp)
+        window._update_progress = dialog
+        monkeypatch.setattr(window, "_confirm_discard", lambda: False)
+
+        window._install_update(str(tmp_path / "kurulum.exe"))
+        pump(qapp)
+        assert not dialog.isVisible(), "Vazgeçilince şerit kapanmalı"
+        assert window._update_progress is None
+        dialog.deleteLater()
+
+    def test_kaydedilmemis_degisiklikte_indirme_baslamaz(self, qapp, window,
+                                                         monkeypatch):
+        """Soru indirmeden önce sorulur; vazgeçilirse indirme hiç başlamaz."""
+        monkeypatch.setattr(window, "_confirm_discard", lambda: False)
+        indirmeler: list = []
+        monkeypatch.setattr(window.updater, "download",
+                            lambda info: indirmeler.append(info) or True)
+
+        window._start_update_download(UpdateInfo.from_dict(MANIFEST))
+        pump(qapp)
+        assert indirmeler == [], "Vazgeçilince indirme başlamamalı"
+        assert window._update_progress is None
 
 
 # ======================================================================

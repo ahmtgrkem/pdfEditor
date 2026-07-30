@@ -145,6 +145,8 @@ class UpdateProgressDialog(QDialog):
         self.btn_cancel.setEnabled(False)
         self.detail.setText("İptal ediliyor…")
         self.cancelled.emit()
+        # Kapatma burada yapılmaz: indirme iş parçacığı iptali bildirene kadar
+        # (``downloadFailed``) şerit görünür kalır, sonra ``close()`` çağrılır.
 
     def update_progress(self, received: int, total: int, speed: float) -> None:
         if total > 0:
@@ -165,5 +167,14 @@ class UpdateProgressDialog(QDialog):
         self.detail.setText("Uygulama kapanacak ve güncelleme kurulacak.")
         self.btn_cancel.setEnabled(False)
 
-    def reject(self) -> None:  # noqa: D102 - Esc ile kapatmayı iptale bağla
+    def reject(self) -> None:
+        """Esc / kapatma isteği: indirmeyi iptal eder **ve** pencereyi kapatır.
+
+        Yalnızca iptal edip kapanmamak diyaloğu kilitliyordu: ``close()``
+        çağrısı ``reject()``a düştüğü için uygulama şeridi hiçbir yoldan
+        kapatamıyor, kullanıcı "Kurulum başlatılıyor… / İptal ediliyor…"
+        yazan pencerede kalıyordu (kaydedilmemiş değişiklik sorusuna
+        "Kaydetme" ya da "İptal" denen her akışta).
+        """
         self._on_cancel()
+        super().reject()
