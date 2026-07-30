@@ -12,6 +12,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QFont,
     QImage,
     QPainter,
     QPainterPath,
@@ -1217,6 +1218,28 @@ class PdfView(FileDropMixin, QGraphicsView):
         return False
 
     # -- önizleme çizimi -----------------------------------------------
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """Belge yokken boş tuval yerine ne yapılacağını söyler."""
+        super().paintEvent(event)
+        if self._items:
+            return
+        painter = QPainter(self.viewport())
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            p = theme.current()
+            font = QFont(self.font())
+            font.setPointSizeF(max(11.0, font.pointSizeF() + 2))
+            painter.setFont(font)
+            painter.setPen(QColor(p.text_muted))
+            painter.drawText(
+                self.viewport().rect(),
+                Qt.AlignCenter,
+                "Görüntülemek için bir belge açın\n\n"
+                "Ctrl+O ile seçin ya da dosyayı buraya bırakın",
+            )
+        finally:
+            painter.end()
+
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: N802
         super().drawForeground(painter, rect)
         painter.setRenderHint(QPainter.Antialiasing, True)
