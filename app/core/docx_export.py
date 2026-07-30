@@ -23,7 +23,7 @@ import zipfile
 from typing import Sequence
 
 from .document import PdfDocument, normalize_text
-from .pdf_backend import Matrix, fitz
+from .pdf_backend import Matrix
 
 #: Word ölçü birimleri
 TWIPS_PER_PT = 20                 # 1 punto = 20 twip
