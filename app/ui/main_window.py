@@ -1864,9 +1864,14 @@ class MainWindow(QMainWindow):
             return
 
         self.show_message("Kurulum başlatıldı, uygulama kapanıyor…")
-        # Kurulum süreci ayrı başlatıldı; çıkış bir sonraki olay döngüsünde.
         self._quitting_for_update = True
-        QTimer.singleShot(400, QApplication.quit)
+        # Şerit önce kapatılır: aksi hâlde uygulama kapanırken ekranda
+        # donmuş bir "Kurulum başlatılıyor…" penceresi kalıyor.
+        self._close_update_progress()
+        # ``close()`` kapanış temizliğini de çalıştırır (iş parçacıkları,
+        # ayarların yazılması); ardından güvenlik ağı olarak ``quit``.
+        QTimer.singleShot(300, self.close)
+        QTimer.singleShot(1500, QApplication.quit)
 
     def _on_up_to_date(self, version: str) -> None:
         self.settings.update_last_check = datetime.now().isoformat(timespec="seconds")

@@ -189,6 +189,55 @@ class TestManifestCozumleme:
 # 5.3 İndirme
 # ======================================================================
 class TestIndirme:
+    def test_ayni_dosya_varsa_yeniden_indirilmez(self, qapp, fake_network,
+                                                 temp_downloads, make_service):
+        """Kurulum yarıda kaldıysa 128 MB'ı tekrar indirmek gerekmez."""
+        veri = b"MZ" + b"onceden-indirildi"
+        bilgi = UpdateInfo.from_dict(manifest_icin(veri))
+        temp_downloads.mkdir(parents=True, exist_ok=True)
+        hedef = temp_downloads / bilgi.filename()
+        hedef.write_bytes(veri)
+
+        servis = make_service("https://example.com/version.json")
+        bitenler: list = []
+        servis.downloadFinished.connect(bitenler.append)
+
+        assert servis.download(bilgi) is True
+        pump(qapp)
+        assert bitenler == [str(hedef)], "Var olan dosya doğrudan kullanılmalı"
+        assert fake_network["urls"] == [], "Ağa hiç gidilmemeli"
+
+    def test_ozet_uyusmuyorsa_yeniden_indirilir(self, qapp, fake_network,
+                                                temp_downloads, make_service):
+        veri = b"MZ" + b"dogru-icerik"
+        bilgi = UpdateInfo.from_dict(manifest_icin(veri))
+        fake_network["payload"] = veri
+        temp_downloads.mkdir(parents=True, exist_ok=True)
+        (temp_downloads / bilgi.filename()).write_bytes(b"bozuk")
+
+        from PySide6.QtCore import QDeadlineTimer
+
+        servis = make_service("https://example.com/version.json")
+        assert servis.download(bilgi) is True
+        son = QDeadlineTimer(5000)
+        while not son.hasExpired() and not fake_network["urls"]:
+            pump(qapp)
+        assert fake_network["urls"], "Bozuk dosya için indirme başlamalı"
+
+    def test_eski_kurulumlar_temizlenir_gunluk_kalir(self, temp_downloads):
+        temp_downloads.mkdir(parents=True, exist_ok=True)
+        (temp_downloads / "eski_v1_Setup.exe").write_bytes(b"MZ")
+        (temp_downloads / "yeni_v2_Setup.exe").write_bytes(b"MZ")
+        (temp_downloads / "install.log").write_text("kurulum kaydi", encoding="utf-8")
+
+        silinen = UpdaterService.cleanup_downloads(
+            keep=str(temp_downloads / "yeni_v2_Setup.exe")
+        )
+        assert silinen == 1
+        assert (temp_downloads / "yeni_v2_Setup.exe").exists()
+        assert not (temp_downloads / "eski_v1_Setup.exe").exists()
+        assert (temp_downloads / "install.log").exists(), "Günlük teşhis için kalmalı"
+
     def test_dosya_indirilir_ve_ilerleme_bildirilir(self, fake_network, tmp_path):
         veri = b"MZ" + b"x" * 5000
         fake_network["payload"] = veri
@@ -469,50 +518,51 @@ class TestSessizKurulum:
             r"C:\Users\x\AppData\Local\Programs\App"
         ) == ["/CURRENTUSER"]
 
-    def test_kurulum_uygulama_kapanmadan_baslamaz(self, monkeypatch, tmp_path,
-                                                  temp_downloads):
-        """Yarış koşulu regresyonu.
+    def test_kurulum_kabuk_uzerinden_baslatilir(self, monkeypatch, tmp_path,
+                                                temp_downloads):
+        """Kurulum, biz kapandıktan sonra yaşamalı.
 
-        Kurulum doğrudan başlatılırsa Inno'nun "uygulamalar kapatılıyor" adımı
-        hâlâ kapanmakta olan uygulamayla yarışır ve orada takılabilir; kurulum
-        bu yüzden süreç kimliğimiz bekletilerek başlatılır.
+        Uygulama bir Windows *Job* nesnesine bağlıysa (kabuktan/terminalden
+        açıldığında) biz kapandığımız anda tüm alt süreçler öldürülür;
+        ``DETACHED_PROCESS`` ve ``CREATE_BREAKAWAY_FROM_JOB`` bunu
+        engellemiyor. Bu yüzden kurulum ``ShellExecuteW`` ile Explorer'a
+        doğurtulur — kurulum hiç başlamama hatasının kök nedeni buydu.
         """
         kurulum = tmp_path / "setup.exe"
         kurulum.write_bytes(b"MZ")
         temp_downloads.mkdir(parents=True, exist_ok=True)
-        cagrilar: list = []
+        kabuk_cagrilari: list = []
+        popen_cagrilari: list = []
 
         monkeypatch.setattr(up.sys, "platform", "win32")
-        monkeypatch.setattr(up.shutil, "which", lambda _ad: r"C:\ps\powershell.exe")
+        monkeypatch.setattr(up, "_shell_execute",
+                            lambda yol, arg: kabuk_cagrilari.append((yol, arg)) or True)
         monkeypatch.setattr(up.subprocess, "Popen",
-                            lambda c, **k: cagrilar.append((c, k)) or type("P", (), {})())
-        monkeypatch.setattr(up.os, "getpid", lambda: 1234)
+                            lambda c, **k: popen_cagrilari.append(c) or type("P", (), {})())
 
         launch_installer(str(kurulum))
 
-        komut, kwargs = cagrilar[0]
-        assert komut[0] == r"C:\ps\powershell.exe"
-        betik = base64.b64decode(komut[komut.index("-EncodedCommand") + 1]).decode(
-            "utf-16-le"
-        )
-        assert "Wait-Process -Id 1234" in betik
-        assert str(kurulum) in betik
-        assert "/SILENT" in betik
-        # Uygulama kapanınca bekleyici de ölmemeli
-        assert kwargs.get("creationflags") or kwargs.get("start_new_session")
+        assert popen_cagrilari == [], "Kurulum subprocess ile başlatılmamalı"
+        (yol, argumanlar), = kabuk_cagrilari
+        assert yol == str(kurulum)
+        assert "/SILENT" in argumanlar
+        assert "/CLOSEAPPLICATIONS" in argumanlar, "Inno açık uygulamayı kendisi kapatır"
 
-    def test_powershell_yoksa_dogrudan_baslatilir(self, monkeypatch, tmp_path,
-                                                  temp_downloads):
+    def test_kabuk_basarisizsa_dogrudan_baslatilir(self, monkeypatch, tmp_path,
+                                                   temp_downloads):
         kurulum = tmp_path / "setup.exe"
         kurulum.write_bytes(b"MZ")
         temp_downloads.mkdir(parents=True, exist_ok=True)
         cagrilar: list = []
-        monkeypatch.setattr(up.shutil, "which", lambda _ad: None)
+        monkeypatch.setattr(up.sys, "platform", "win32")
+        monkeypatch.setattr(up, "_shell_execute", lambda yol, arg: False)
         monkeypatch.setattr(up.subprocess, "Popen",
-                            lambda c, **k: cagrilar.append(c) or type("P", (), {})())
+                            lambda c, **k: cagrilar.append((c, k)) or type("P", (), {})())
         launch_installer(str(kurulum))
-        assert cagrilar[0][0] == str(kurulum)
-        assert "/SILENT" in cagrilar[0]
+        komut, kwargs = cagrilar[0]
+        assert komut[0] == str(kurulum)
+        assert "/SILENT" in komut
+        assert kwargs.get("creationflags") or kwargs.get("start_new_session")
 
     def test_sessiz_olmayan_kurulumda_parametre_yok(self, monkeypatch, tmp_path,
                                                    temp_downloads):
@@ -520,7 +570,7 @@ class TestSessizKurulum:
         kurulum.write_bytes(b"MZ")
         temp_downloads.mkdir(parents=True, exist_ok=True)
         cagrilar: list = []
-        monkeypatch.setattr(up.shutil, "which", lambda _ad: None)
+        monkeypatch.setattr(up.sys, "platform", "linux")
         monkeypatch.setattr(up.subprocess, "Popen",
                             lambda c, **k: cagrilar.append(c) or type("P", (), {})())
         launch_installer(str(kurulum), silent=False)

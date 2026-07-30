@@ -27,12 +27,10 @@ Güvenlik: indirilen dosya çalıştırılacağı için varsayılan olarak yaln�
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,7 +40,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 from .. import __app_name__, __version__
 
@@ -164,6 +162,20 @@ def fetch_manifest(url: str, timeout: int = NETWORK_TIMEOUT) -> UpdateInfo:
     except json.JSONDecodeError as exc:
         raise ValueError(f"Sürüm dosyası okunamadı: {exc}") from exc
     return UpdateInfo.from_dict(data)
+
+
+def file_sha256(path: str) -> str:
+    """Dosyanın sha256 özeti; dosya yoksa boş dize."""
+    if not os.path.isfile(path):
+        return ""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
 
 
 def human_size(num_bytes: float) -> str:
@@ -332,35 +344,41 @@ def installer_command(installer_path: str, silent: bool = True) -> list[str]:
     return command
 
 
-def _wait_then_run_script(pid: int, command: list[str]) -> str:
-    """``pid`` kapanınca ``command``ı çalıştıran PowerShell betiği."""
-    def tirnak(deger: str) -> str:
-        return "'" + str(deger).replace("'", "''") + "'"
+def _shell_execute(path: str, arguments: list[str]) -> bool:
+    """Kurulumu Windows kabuğu (Explorer) üzerinden başlatır.
 
-    argumanlar = ", ".join(tirnak(a) for a in command[1:])
-    satirlar = [
-        "$ErrorActionPreference='SilentlyContinue'",
-        f"Wait-Process -Id {int(pid)} -Timeout 120",
-        "Start-Sleep -Milliseconds 700",
-        f"Start-Process -FilePath {tirnak(command[0])}"
-        + (f" -ArgumentList {argumanlar}" if argumanlar else ""),
-    ]
-    return "; ".join(satirlar)
+    **Neden ``subprocess`` değil:** uygulama bir *Job* nesnesine bağlıysa —
+    kabuktan, terminalden ya da bazı başlatıcılardan açıldığında böyle olur —
+    biz kapandığımız anda tüm alt süreçler de öldürülür. ``DETACHED_PROCESS``
+    ve ``CREATE_BREAKAWAY_FROM_JOB`` bunu **engellemiyor** (bu makinede
+    ölçüldü: her ikisinde de çocuk öldü). ``ShellExecuteW`` süreci Explorer'a
+    doğurttuğu için kurulum bizim ömrümüze bağlı kalmaz.
 
-
-def launch_installer(installer_path: str, silent: bool = True) -> subprocess.Popen:
-    """Inno Setup kurulumunu ayrı (detached) bir süreç olarak başlatır.
-
-    Kurulum, **uygulama tamamen kapandıktan sonra** başlatılır: doğrudan
-    başlatılırsa Inno'nun "uygulamalar kapatılıyor" adımı hâlâ kapanmakta olan
-    uygulamayla yarışır ve kurulum orada takılabilir. Bunun için PowerShell'e
-    süreç kimliğimizi bekletiriz; PowerShell yoksa ya da başlatılamazsa
-    doğrudan başlatmaya düşülür.
+    Kurulumun beklemesi gerekmiyor: Inno Setup ``/CLOSEAPPLICATIONS`` ve
+    ``CloseApplications=force`` ile hâlâ açık olan uygulamayı kendisi kapatır.
     """
+    import ctypes  # yalnızca Windows'ta gerekiyor
+
+    parametre = subprocess.list2cmdline(arguments) if arguments else None
+    SW_SHOWNORMAL = 1
+    sonuc = int(ctypes.windll.shell32.ShellExecuteW(
+        None, "open", path, parametre, os.path.dirname(path) or None, SW_SHOWNORMAL
+    ))
+    # ShellExecuteW: 32'den büyük değer başarı, küçük/eşit değer hata kodudur.
+    return sonuc > 32
+
+
+def launch_installer(installer_path: str, silent: bool = True) -> None:
+    """Inno Setup kurulumunu, bizden bağımsız yaşayacak şekilde başlatır."""
     if not os.path.isfile(installer_path):
         raise FileNotFoundError(installer_path)
 
     command = installer_command(installer_path, silent=silent)
+
+    if sys.platform == "win32":  # pragma: no cover - platforma bağlı
+        if _shell_execute(command[0], command[1:]):
+            return
+        # Kabuk başlatamadı: son çare olarak doğrudan denenir.
 
     kwargs: dict[str, Any] = {"close_fds": True, "cwd": download_directory()}
     if sys.platform == "win32":  # pragma: no cover - platforma bağlı
@@ -370,21 +388,7 @@ def launch_installer(installer_path: str, silent: bool = True) -> subprocess.Pop
         )
     else:
         kwargs["start_new_session"] = True
-
-    kabuk = shutil.which("powershell.exe") if sys.platform == "win32" else None
-    if kabuk:  # pragma: no cover - platforma bağlı
-        betik = _wait_then_run_script(os.getpid(), command)
-        kodlanmis = base64.b64encode(betik.encode("utf-16-le")).decode("ascii")
-        try:
-            return subprocess.Popen(  # noqa: S603
-                [kabuk, "-NoProfile", "-NonInteractive",
-                 "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
-                 "-EncodedCommand", kodlanmis],
-                **kwargs,
-            )
-        except OSError:
-            pass            # PowerShell yok: doğrudan başlat
-    return subprocess.Popen(command, **kwargs)  # noqa: S603
+    subprocess.Popen(command, **kwargs)  # noqa: S603
 
 
 # ======================================================================
@@ -537,6 +541,13 @@ class UpdaterService(QObject):
             return False
 
         target = os.path.join(download_directory(), info.filename())
+        # Aynı kurulum daha önce indirildiyse (kurulum yarıda kaldı, kullanıcı
+        # yeniden denedi) 128 MB'ı tekrar indirmek yerine özeti doğrulayıp
+        # doğrudan kuruluma geçilir.
+        if info.sha256 and file_sha256(target) == info.sha256:
+            QTimer.singleShot(0, lambda: self.downloadFinished.emit(target))
+            return True
+
         worker = _DownloadWorker(info, target, self)
         worker.progress.connect(self.downloadProgress)
         worker.succeeded.connect(self._on_download_finished)
@@ -553,6 +564,8 @@ class UpdaterService(QObject):
 
     def _on_download_finished(self, path: str) -> None:
         self._download_worker = None
+        # Önceki sürümlerin kurulum dosyaları %TEMP%'de birikiyordu.
+        self.cleanup_downloads(keep=path)
         self.downloadFinished.emit(path)
 
     def _on_download_failed(self, message: str) -> None:
@@ -595,14 +608,18 @@ class UpdaterService(QObject):
 
     @staticmethod
     def cleanup_downloads(keep: str | None = None) -> int:
-        """Eski kurulum dosyalarını siler; silinen dosya sayısını döndürür."""
+        """Eski kurulum dosyalarını siler; silinen dosya sayısını döndürür.
+
+        Yalnızca ``.exe`` dosyaları silinir: ``install.log`` kurulum sorunlarını
+        teşhis etmenin tek kaydı, onu korumak gerekir.
+        """
         directory = download_directory()
         if not os.path.isdir(directory):
             return 0
         removed = 0
         keep_name = os.path.basename(keep) if keep else None
         for name in os.listdir(directory):
-            if name == keep_name:
+            if name == keep_name or not name.lower().endswith(".exe"):
                 continue
             path = os.path.join(directory, name)
             try:
