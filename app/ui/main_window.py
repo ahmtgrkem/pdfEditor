@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import datetime
 
 from PySide6.QtCore import QByteArray, QRegularExpression, QSize, Qt, QTimer
@@ -223,6 +224,13 @@ class MainWindow(QMainWindow):
         A("find_prev", "Önceki sonuç", None, "Shift+F3", self.search.prev_hit)
         A("clear_annots", "Sayfadaki açıklamaları temizle", "eraser", None,
           self.clear_page_annotations)
+        # -- seçili sayfa görseli ---------------------------------------
+        A("delete_selection", "Seçili görseli sil", "eraser", None,
+          self.view.delete_selected_image)
+        A("bring_front", "Öne getir", None, None,
+          lambda: self.view.bring_selected_image(True))
+        A("send_back", "Arkaya gönder (metnin altına)", None, None,
+          lambda: self.view.bring_selected_image(False))
 
         # -- görünüm ----------------------------------------------------
         A("zoom_in", "Yakınlaştır", "zoom_in", QKeySequence.ZoomIn, self.zoom_in)
@@ -357,6 +365,10 @@ class MainWindow(QMainWindow):
         m_edit.addAction(a["find"])
         m_edit.addAction(a["find_next"])
         m_edit.addAction(a["find_prev"])
+        m_edit.addSeparator()
+        m_edit.addAction(a["bring_front"])
+        m_edit.addAction(a["send_back"])
+        m_edit.addAction(a["delete_selection"])
         m_edit.addSeparator()
         m_edit.addAction(a["clear_annots"])
 
@@ -571,6 +583,7 @@ class MainWindow(QMainWindow):
         self.view.requestText.connect(self._on_request_text)
         self.view.requestImage.connect(self._on_request_image)
         self.view.requestSignature.connect(self._on_request_signature)
+        self.view.imageSelectionChanged.connect(self._on_image_selection)
 
         self.thumbnails.pageActivated.connect(lambda i: self.view.go_to_page(i))
         self.thumbnails.status.connect(self.show_message)
@@ -633,6 +646,11 @@ class MainWindow(QMainWindow):
         else:
             self.setWindowTitle(__app_name__)
 
+    def _on_image_selection(self, var: bool) -> None:
+        """Görsel komutları yalnızca bir görsel seçiliyken etkindir."""
+        for key in ("delete_selection", "bring_front", "send_back"):
+            self._actions[key].setEnabled(bool(var))
+
     def _update_actions(self) -> None:
         has_doc = self.controller.is_open
         pages = self.controller.page_count
@@ -647,6 +665,7 @@ class MainWindow(QMainWindow):
         ):
             self._actions[key].setEnabled(has_doc)
         self._actions["page_delete"].setEnabled(has_doc and pages > 1)
+        self._on_image_selection(self.view.selected_image is not None)
         self._actions["undo"].setEnabled(self.controller.can_undo())
         self._actions["redo"].setEnabled(self.controller.can_redo())
         for action in self.tool_actions.values():
@@ -1611,14 +1630,25 @@ class MainWindow(QMainWindow):
 
         # Etkileşimli (dinamik XFA) formda belge akışı yalnızca "Adobe Reader
         # gerekir" uyarı sayfasıdır; Word'e o sayfa değil formun kendisi
-        # gitmeli. Form burada geçici olarak çizilir. Tüm bölümler çizilir:
-        # betikle açılan bölümler şablonda "gizli" durduğu için yalnızca
-        # görünen yerleşim aktarılsa doldurulan alanlar Word'e hiç girmezdi.
+        # gitmeli. Canlı görünüm varken kaynak **ekrandaki form**dur: şablonu
+        # yeniden çizmek betikle açılan bölümleri, eklenen satırları ve o anki
+        # değerleri ıskalıyor — şablon okunamazsa da sessizce bomboş bir sayfa
+        # üretip Word'e onu yazıyordu. Canlı görünüm yoksa şablon çizilir.
         form_mu = self.in_xfa_mode or xfa.is_dynamic(self.controller.document.raw)
         gecici = None
+        basili = None
+        canliydi = False
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            if form_mu:
+            if self.in_xfa_mode:
+                basili = os.path.join(
+                    tempfile.gettempdir(), f"agy_xfa_{os.getpid()}.pdf"
+                )
+                if self.xfa_view.export_pdf_blocking(basili):
+                    gecici = PdfDocument()
+                    gecici.open(basili)
+                    canliydi = True
+            if form_mu and gecici is None:
                 gecici = self._xfa_static_document(show_hidden=True)
             docx_export.export_docx(gecici or self.controller.document, path)
         except Exception as exc:  # noqa: BLE001
@@ -1627,11 +1657,21 @@ class MainWindow(QMainWindow):
         finally:
             if gecici is not None:
                 gecici.close()
+            if basili and os.path.exists(basili):
+                try:
+                    os.remove(basili)
+                except OSError:
+                    pass
             if QApplication.overrideCursor() is not None:
                 QApplication.restoreOverrideCursor()
 
         self.settings.last_directory = os.path.dirname(path)
-        ek = " (form tüm bölümleriyle çizilerek aktarıldı)" if form_mu else ""
+        if canliydi:
+            ek = " (formun ekrandaki hâli aktarıldı)"
+        elif form_mu:
+            ek = " (form tüm bölümleriyle çizilerek aktarıldı)"
+        else:
+            ek = ""
         self.show_message(
             f"Word belgesi kaydedildi{ek}: {os.path.basename(path)}"
         )

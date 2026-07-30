@@ -5,7 +5,7 @@ Kurulum betiği (``installer/*.iss``) ve derleme betiği (``build.ps1``) bu
 değeri buradan okur; elle güncellenmemelidir.
 """
 
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 __app_name__ = "AGY PDF Editor"
 __app_short_name__ = "AGY PDF"
 __org_name__ = "AGY Software"

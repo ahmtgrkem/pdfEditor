@@ -5,8 +5,11 @@ döndürme uygulanmış sayfa uzayı) ve gerekli dönüşümü kendisi yapar.
 """
 from __future__ import annotations
 
+import atexit
 import io
 import math
+import os
+import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
@@ -50,6 +53,10 @@ class TextStyle:
     align: int = 0  # 0=sol 1=orta 2=sağ
     background: RGB | None = None
     border: bool = False
+    #: Düzenlenen metnin belgedeki özgün font adı (``ABCDEF+FrutigerLTStd``).
+    #: Verilirse ve gömülü font yeni metnin tüm karakterlerini taşıyorsa
+    #: **o font** yeniden kullanılır; yazı tipi hiç değişmez.
+    source_font: str | None = None
 
 
 @dataclass
@@ -188,6 +195,153 @@ MIN_BOX_HEIGHT_FACTOR = 1.5
 #: Genişliği verilmemiş kutular için varsayılan genişlik (pt).
 DEFAULT_BOX_WIDTH = 320.0
 
+#: Metin değiştirilirken silinecek şeridin taban çizgisine göre yüksekliği
+#: (punto çarpanı). Hedef satırın çıkıntılarını tamamen kapsar ama üst/alt
+#: satırın gliflerine değmez.
+REDACT_ASCENT = 0.90
+REDACT_DESCENT = 0.30
+
+
+
+# ----------------------------------------------------------------------
+# Belgenin kendi gömülü fontunu yeniden kullanma
+# ----------------------------------------------------------------------
+#: (belge, xref) -> geçici font dosyası. Aynı fontla arka arkaya düzenleme
+#: yapıldığında font tekrar tekrar çıkarılmasın.
+_EMBEDDED_FONTS: dict[tuple[int, int], str] = {}
+
+
+@atexit.register
+def _cleanup_embedded_fonts() -> None:
+    for yol in _EMBEDDED_FONTS.values():
+        try:
+            os.remove(yol)
+        except OSError:
+            pass
+
+
+def _font_key(name: str) -> str:
+    """``ABCDEF+Frutiger LT Std-Roman`` -> ``frutigerltstdroman``."""
+    return "".join(
+        c for c in (name or "").split("+")[-1].lower() if c.isalnum()
+    )
+
+
+def _font_covers(fontfile: str, text: str) -> bool:
+    """Font, metindeki **her** karakteri çizebiliyor mu?
+
+    Gömülü fontlar çoğunlukla alt kümedir (yalnızca sayfada geçen glifler).
+    Kullanıcı yeni bir harf yazdığında o glif yoksa metin boş kutulara
+    dönerdi; bu yüzden kapsama denetlenmeden özgün font kullanılmaz.
+    """
+    try:
+        font = fitz.Font(fontfile=fontfile)
+    except Exception:  # noqa: BLE001 - bozuk/desteklenmeyen font
+        return False
+    return all(
+        font.has_glyph(ord(ch))
+        for ch in set(text)
+        if ch not in "\n\r\t"
+    )
+
+
+def _extract_to_file(doc: PdfDocument, xref: int) -> str | None:
+    """Gömülü fontu geçici dosyaya yazar; MuPDF yükleyemiyorsa ``None``."""
+    anahtar = (id(doc.raw), int(xref))
+    yol = _EMBEDDED_FONTS.get(anahtar)
+    if yol is not None:
+        return yol if os.path.exists(yol) else None
+    try:
+        _ad, ext, _t, veri = doc.raw.extract_font(xref)
+    except Exception:  # noqa: BLE001
+        return None
+    if not veri:
+        return None
+    gecici = tempfile.NamedTemporaryFile(
+        prefix="agy_font_", suffix=f".{ext or 'ttf'}", delete=False
+    )
+    gecici.write(veri)
+    gecici.close()
+    try:
+        fitz.Font(fontfile=gecici.name)
+    except Exception:  # noqa: BLE001 - bozuk font gömülmesin
+        os.remove(gecici.name)
+        return None
+    _EMBEDDED_FONTS[anahtar] = gecici.name
+    return gecici.name
+
+
+def embedded_font_files(
+    doc: PdfDocument, page_index: int, base_name: str | None
+) -> list[str]:
+    """Ada uyan **bütün** gömülü font dosyaları (sayfadaki alt kümeler).
+
+    Tek bir dosya döndürmek yetmiyor: bir sayfada aynı adı taşıyan birden
+    çok alt küme bulunabiliyor (ör. ``AAAMNC+CharisSIL`` 19 glif,
+    ``UMGJVJ+CharisSIL`` 86 glif). İlkini seçmek çoğu zaman metni
+    çizemeyen kümeyi seçmek oluyordu; çağıran, işine yarayanı seçer.
+
+    Biçim ayrımı yapılmaz: ``ttf``, ``otf``, ``cff`` (Type1C) ve ``pfa``
+    (Type1) hepsi çalışır. ``n/a`` fontun gömülü **olmadığını** söyler.
+    """
+    if not base_name:
+        return []
+    hedef = _font_key(base_name)
+    if not hedef:
+        return []
+    yollar: list[str] = []
+    with doc.lock:
+        try:
+            kayitlar = doc.raw.load_page(page_index).get_fonts(full=False)
+        except Exception:  # noqa: BLE001 - bozuk kaynak sözlüğü
+            return []
+        for kayit in kayitlar:
+            xref, uzanti, _tur, basefont = kayit[0], kayit[1], kayit[2], kayit[3]
+            if uzanti in ("n/a", "", None):
+                continue
+            # Span'ın bildirdiği ad ile kaynak sözlüğündeki ad birebir aynı
+            # olmayabilir ("Georgia" / "AAAAAA+Georgia Regular").
+            aday = _font_key(str(basefont))
+            if not aday or not (aday == hedef
+                                or aday.startswith(hedef)
+                                or hedef.startswith(aday)):
+                continue
+            yol = _extract_to_file(doc, xref)
+            if yol:
+                yollar.append(yol)
+    return yollar
+
+
+def embedded_font_path(
+    doc: PdfDocument, page_index: int, base_name: str | None
+) -> str | None:
+    """Ekranda göstermek için en zengin alt küme (en çok kod noktası)."""
+    en_iyi, en_cok = None, -1
+    for yol in embedded_font_files(doc, page_index, base_name):
+        try:
+            sayi = len(fitz.Font(fontfile=yol).valid_codepoints())
+        except Exception:  # noqa: BLE001
+            continue
+        if sayi > en_cok:
+            en_iyi, en_cok = yol, sayi
+    return en_iyi
+
+
+def embedded_fontfile(
+    doc: PdfDocument, page_index: int, base_name: str | None, text: str
+) -> str | None:
+    """Metnin **tamamını** çizebilen gömülü alt kümeyi dosya olarak verir.
+
+    Böylece belgedeki yazı tipi kurulu olmasa bile düzenlenen metin aynı
+    fontla yazılır — sistemdeki bir aileye "benzetme" yapılmaz. Hiçbir alt
+    küme yetmiyorsa ``None``: eksik glif, metni boş kutulara çevirirdi.
+    """
+    if not text.strip():
+        return None
+    for yol in embedded_font_files(doc, page_index, base_name):
+        if _font_covers(yol, text):
+            return yol
+    return None
 
 
 def add_text(
@@ -198,6 +352,7 @@ def add_text(
     style: TextStyle,
     origin: tuple[float, float] | None = None,
     line_height: float | None = None,
+    fontfile: str | None = None,
 ) -> bool:
     """Sayfaya Unicode destekli metin kutusu veya baseline hizalı metin ekler.
 
@@ -215,7 +370,13 @@ def add_text(
     if not text.strip():
         return False
 
-    fontname, fontfile = fonts.resolve(style.family, style.bold, style.italic)
+    if fontfile:
+        # Belgeden çıkarılan özgün font: takma adı dosyaya göre türetilir.
+        fontname = "F" + "".join(
+            c for c in os.path.splitext(os.path.basename(fontfile))[0] if c.isalnum()
+        )
+    else:
+        fontname, fontfile = fonts.resolve(style.family, style.bold, style.italic)
     with doc.lock:
         page = doc.raw.load_page(page_index)
         rect = Rect(*visual_rect)
@@ -338,25 +499,10 @@ def find_text_at_point(
                         bold = bool(flags & 16) or ("bold" in font_name.lower())
                         italic = bool(flags & 2) or ("italic" in font_name.lower()) or ("oblique" in font_name.lower())
 
-                        fn_lower = font_name.lower()
-                        if "times" in fn_lower:
-                            family = "Times New Roman"
-                        elif "courier" in fn_lower:
-                            family = "Courier New"
-                        elif "consolas" in fn_lower:
-                            family = "Consolas"
-                        elif "georgia" in fn_lower:
-                            family = "Georgia"
-                        elif "verdana" in fn_lower:
-                            family = "Verdana"
-                        elif "tahoma" in fn_lower:
-                            family = "Tahoma"
-                        elif "segoe" in fn_lower:
-                            family = "Segoe UI"
-                        elif "calibri" in fn_lower:
-                            family = "Calibri"
-                        else:
-                            family = "Arial"
+                        # Kurulu yazı tipleri arasından en yakını. Eskiden
+                        # burada sekiz dallı bir zincir vardı ve tanımadığı
+                        # her fontu Arial yapıyordu.
+                        family = fonts.match(font_name)
 
                         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
                         dist = (px - cx) ** 2 + (py - cy) ** 2
@@ -378,6 +524,42 @@ def find_text_at_point(
         return best_span
 
 
+def _line_band(page, pdf_rect: Rect, baseline: float,
+               size: float) -> tuple[float, float]:
+    """Hedef satırın, komşu satırlara taşmayan dikey şeridi.
+
+    Font metriğinden gelen yükseklik sıkı satır aralığında üst/alt satırın
+    kutusuna giriyor. Şerit, komşu satırın **kendi şeridinin** kenarında
+    kesilir. Her satır için aynı kural işlediğinden şeritler asla üst üste
+    binmez; hedefin çıkıntıları içeride kalır, komşununkilere dokunulmaz.
+    (Taban çizgileri arasındaki orta nokta fazla ihtiyatlı kalıyor: hedefin
+    kendi çıkıntıları şeridin dışında kalınca metin silinmiyordu.)
+    """
+    ust = baseline - REDACT_ASCENT * size
+    alt = baseline + REDACT_DESCENT * size
+    try:
+        sozluk = page.get_text("dict")
+    except Exception:  # noqa: BLE001 - bozuk içerik akışı
+        return ust, alt
+    for blok in sozluk.get("blocks", []):
+        if blok.get("type") != 0:
+            continue
+        for satir in blok.get("lines", []):
+            for span in satir.get("spans", []):
+                x0, _y0, x1, _y1 = span.get("bbox", (0, 0, 0, 0))
+                if x1 <= pdf_rect.x0 or x0 >= pdf_rect.x1:
+                    continue                    # yatayda kesişmiyor
+                oy = float(span.get("origin", (0, baseline))[1])
+                if abs(oy - baseline) < 0.5:
+                    continue                    # hedefin kendi satırı
+                komsu = float(span.get("size", size))
+                if oy < baseline:
+                    ust = max(ust, oy + REDACT_DESCENT * komsu)
+                else:
+                    alt = min(alt, oy - REDACT_ASCENT * komsu)
+    return (ust, alt) if alt > ust else (baseline - 0.1, baseline + 0.1)
+
+
 def replace_text(
     doc: PdfDocument,
     page_index: int,
@@ -388,13 +570,27 @@ def replace_text(
     line_height: float | None = None,
 ) -> bool:
     """Mevcut metin alanını siler (redaction) ve yerine yeni metni yazar."""
+    # Özgün font redaksiyondan **önce** çıkarılır: metin silindikten sonra
+    # font kaynak sözlüğünden düşebiliyor ve geri kazanılamıyor.
+    ozgun = embedded_fontfile(doc, page_index, style.source_font, new_text)
+
     with doc.lock:
         page = doc.raw.load_page(page_index)
         v_rect = Rect(*visual_rect)
         pdf_rect = doc.to_pdf_rect(page_index, v_rect)
 
-        # Orijinal metni kalıntısız silmek için 0.5pt tampon genişletme
-        clean_rect = Rect(pdf_rect.x0 - 0.5, pdf_rect.y0 - 0.5, pdf_rect.x1 + 0.5, pdf_rect.y1 + 0.5)
+        if origin is not None and style.size > 0:
+            # Span'ın bildirdiği kutu font metriğinden gelir ve sıkı satır
+            # aralığında **komşu satıra taşar**; o kutuyla redaksiyon yapmak
+            # üstteki satırı da siliyordu. Bunun yerine kutu taban çizgisinden
+            # kurulur: hedef tamamen kalkar, komşu satıra dokunulmaz.
+            taban = doc.to_pdf_point(page_index, Point(*origin)).y
+            ust, alt = _line_band(page, pdf_rect, taban, float(style.size))
+            clean_rect = Rect(pdf_rect.x0 - 0.5, ust, pdf_rect.x1 + 0.5, alt)
+        else:
+            # Orijinal metni kalıntısız silmek için 0.5pt tampon genişletme
+            clean_rect = Rect(pdf_rect.x0 - 0.5, pdf_rect.y0 - 0.5,
+                              pdf_rect.x1 + 0.5, pdf_rect.y1 + 0.5)
         # ``fill`` verilmez: dolgu, alanı düz bir dikdörtgenle boyar ve
         # metnin altındaki arka planı (desen, logo, renkli zemin) yok eder —
         # kullanıcı düzenlemeye girer girmez metnin ardında beyaz bir kutu
@@ -410,7 +606,7 @@ def replace_text(
 
     return add_text(
         doc, page_index, visual_rect, new_text, style,
-        origin=origin, line_height=line_height,
+        origin=origin, line_height=line_height, fontfile=ozgun,
     )
 
 
@@ -423,7 +619,9 @@ def add_image(
     visual_rect: tuple[float, float, float, float],
     image_data: bytes,
     keep_aspect: bool = True,
+    front: bool = True,
 ) -> bool:
+    """``front=False`` görseli sayfa içeriğinin **altına** çizer (z sırası)."""
     if not image_data:
         return False
     with doc.lock:
@@ -440,11 +638,117 @@ def add_image(
             rect,
             stream=image_data,
             keep_proportion=keep_aspect,
-            overlay=True,
+            overlay=front,
             rotate=rotate,
         )
     doc.mark_dirty(page_index)
     return True
+
+
+# ----------------------------------------------------------------------
+# Sayfadaki görselleri seçme / taşıma / silme / z sırası
+# ----------------------------------------------------------------------
+def list_images(doc: PdfDocument, page_index: int) -> list[dict]:
+    """Sayfadaki görsel yerleşimleri; çizim sırasına göre (sonuncu en üstte)."""
+    sonuc: list[dict] = []
+    with doc.lock:
+        if not (0 <= page_index < doc.raw.page_count):
+            return []
+        try:
+            bilgiler = doc.raw.load_page(page_index).get_image_info(xrefs=True)
+        except Exception:  # noqa: BLE001 - bozuk kaynak sözlüğü
+            return []
+        for bilgi in bilgiler:
+            kutu = Rect(bilgi.get("bbox", (0, 0, 0, 0)))
+            kutu.normalize()
+            if kutu.width < 2 or kutu.height < 2:
+                continue
+            gorsel = doc.to_visual_rect(page_index, kutu)
+            sonuc.append({
+                "xref": int(bilgi.get("xref", 0)),
+                "rect": (gorsel.x0, gorsel.y0, gorsel.x1, gorsel.y1),
+                "pdf_rect": (kutu.x0, kutu.y0, kutu.x1, kutu.y1),
+            })
+    return sonuc
+
+
+def image_at_point(
+    doc: PdfDocument, page_index: int, visual_point: tuple[float, float]
+) -> dict | None:
+    """Noktadaki görsel. Üst üste binenlerde **en küçüğü** seçilir.
+
+    Tam sayfa bir arka plan görseli varsa en üstteki kural onun üzerindeki
+    küçük logoyu seçilemez kılıyordu.
+    """
+    x, y = visual_point
+    en_iyi = None
+    en_kucuk = float("inf")
+    for gorsel in list_images(doc, page_index):
+        x0, y0, x1, y1 = gorsel["rect"]
+        if not (x0 <= x <= x1 and y0 <= y <= y1):
+            continue
+        alan = (x1 - x0) * (y1 - y0)
+        if alan <= en_kucuk:      # eşitlikte sonraki (üstteki) kazanır
+            en_kucuk = alan
+            en_iyi = gorsel
+    return en_iyi
+
+
+def image_bytes(doc: PdfDocument, xref: int) -> bytes:
+    """Görselin ham baytları; okunamazsa boş."""
+    if not xref:
+        return b""
+    with doc.lock:
+        try:
+            return doc.raw.extract_image(int(xref)).get("image") or b""
+        except Exception:  # noqa: BLE001 - gömülü olmayan/bozuk görsel
+            return b""
+
+
+def remove_image(
+    doc: PdfDocument, page_index: int, visual_rect: tuple[float, float, float, float]
+) -> bool:
+    """Verilen alandaki görseli sayfadan kaldırır; metin ve çizimler kalır."""
+    with doc.lock:
+        page = doc.raw.load_page(page_index)
+        kutu = doc.to_pdf_rect(page_index, Rect(*visual_rect))
+        kutu.normalize()
+        if kutu.width < 1 or kutu.height < 1:
+            return False
+        page.add_redact_annot(kutu, fill=False)
+        try:
+            page.apply_redactions(
+                images=fitz.PDF_REDACT_IMAGE_REMOVE,
+                graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                text=fitz.PDF_REDACT_TEXT_NONE,
+            )
+        except (AttributeError, TypeError):   # eski PyMuPDF sürümleri
+            page.apply_redactions()
+    doc.mark_dirty(page_index)
+    return True
+
+
+def move_image(
+    doc: PdfDocument,
+    page_index: int,
+    visual_rect: tuple[float, float, float, float],
+    new_visual_rect: tuple[float, float, float, float],
+    xref: int,
+    front: bool = True,
+) -> bool:
+    """Görseli yeni bir dikdörtgene taşır/boyutlandırır.
+
+    PDF'te bir görselin yerleşimini yerinde düzenlemek yoktur; baytları alınır,
+    eski yerleşim kaldırılır ve yeni konuma yeniden çizilir.
+    """
+    veri = image_bytes(doc, xref)
+    if not veri:
+        return False
+    if not remove_image(doc, page_index, visual_rect):
+        return False
+    return add_image(
+        doc, page_index, new_visual_rect, veri, keep_aspect=False, front=front
+    )
 
 
 # ----------------------------------------------------------------------

@@ -923,6 +923,11 @@ def render(template: bytes, values: dict[str, str] | None = None,
     sadık kalmaz ama formun tamamını tek seferde doldurulabilir kılar.
     """
     yerlesim = layout_template(template, show_hidden=show_hidden)
+    # Şablon okunamadıysa yerleşim boştur. Bunu çizmek bomboş bir sayfa üretir
+    # ve hata çağırana hiç ulaşmaz — Word'e aktarma tam da böyle sessizce boş
+    # bir belge yazıyordu. Boş yerleşim çizilmez, bildirilir.
+    if not yerlesim.box_count and not yerlesim.background:
+        raise ValueError("XFA şablonu çözümlenemedi (boş yerleşim).")
     degerler = values or {}
     doc = fitz.open()
     genis, yuksek = yerlesim.page_size

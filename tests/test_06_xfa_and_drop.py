@@ -636,11 +636,16 @@ class TestXfaCizim:
     def test_bozuk_sablon_cokertmez(self):
         assert xfa_render.layout_template(b"<bozuk").box_count == 0
         assert xfa_render.layout_template(b"").box_count == 0
-        belge = xfa_render.render(b"<bozuk")
-        try:
-            assert belge.page_count >= 1      # boş da olsa geçerli PDF
-        finally:
-            belge.close()
+
+    def test_bozuk_sablon_bos_sayfa_uretmez(self):
+        """Çözümlenemeyen şablon sessizce boş sayfaya dönüşmemeli.
+
+        Dönüşseydi Word'e aktarma bomboş bir belge yazar, kullanıcı hatayı
+        ancak Word'de görürdü.
+        """
+        for bozuk in (b"<bozuk", b""):
+            with pytest.raises(ValueError):
+                xfa_render.render(bozuk)
 
 
 class TestXfaArayuz:

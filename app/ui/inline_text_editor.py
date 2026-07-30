@@ -50,6 +50,7 @@ from PySide6.QtGui import (
     QTextCursor,
 )
 from PySide6.QtWidgets import (
+    QFontComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -65,6 +66,8 @@ from .dialogs.common import ColorButton
 MIN_FONT_SIZE = 6.0
 MAX_FONT_SIZE = 72.0
 FONT_SIZE_STEP = 2.0
+#: Shift ile eksen kilidinin devreye gireceği en küçük hareket (px)
+AXIS_LOCK_PX = 4
 
 
 @dataclass
@@ -86,6 +89,7 @@ class FloatingMiniToolbar(QFrame):
     """Metin kutusunun üstünde yüzen küçük araç çubuğu."""
 
     fontSizeChanged = Signal(float)
+    familyChanged = Signal(str)
     colorChanged = Signal(QColor)
     boldToggled = Signal(bool)
     italicToggled = Signal(bool)
@@ -119,6 +123,29 @@ class FloatingMiniToolbar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(4)
+
+        # Sistemdeki tüm yazı tipleri: Word/LibreOffice'teki gibi. Qt'nin
+        # kendi font veritabanını kullanır, ayrı bir liste tutulmaz.
+        self.family_combo = QFontComboBox(self)
+        # Yalnızca ölçeklenebilir fontlar: Windows'un eski raster fontları
+        # (Fixedsys, MS Sans Serif, Terminal, System…) DirectWrite ile
+        # çizilemiyor — liste açılınca konsolu uyarı yağmuruna tutuyorlar —
+        # ve zaten PDF'e gömülemedikleri için seçilmeleri de anlamsız.
+        self.family_combo.setFontFilters(QFontComboBox.FontFilter.ScalableFonts)
+        self.family_combo.setFocusPolicy(Qt.NoFocus)
+        self.family_combo.setToolTip("Yazı tipi")
+        self.family_combo.setEditable(False)
+        self.family_combo.setMaxVisibleItems(24)
+        self.family_combo.setMinimumWidth(150)
+        self.family_combo.setStyleSheet(
+            f"QFontComboBox {{ background: {p.surface_alt}; color: {p.text};"
+            f" border: 1px solid {p.border}; border-radius: 4px;"
+            " font-size: 11px; font-weight: normal; padding: 1px 4px; }"
+        )
+        self.set_family(style.family)
+        self.family_combo.currentFontChanged.connect(
+            lambda f: self.familyChanged.emit(f.family())
+        )
 
         self.btn_dec_size = QPushButton("A_", self)
         self.btn_dec_size.setToolTip("Font boyutunu küçült")
@@ -164,12 +191,21 @@ class FloatingMiniToolbar(QFrame):
         self.btn_delete.clicked.connect(self.deleteRequested.emit)
 
         for widget in (
+            self.family_combo,
             self.btn_dec_size, self.lbl_size, self.btn_inc_size,
             self.btn_bold, self.btn_italic, self.color_btn, self.btn_delete,
         ):
             layout.addWidget(widget)
 
         self.current_size = style.size
+
+    def set_family(self, family: str) -> None:
+        """Seçiciyi sinyal üretmeden verilen aileye getirir."""
+        blok = self.family_combo.blockSignals(True)
+        try:
+            self.family_combo.setCurrentFont(QFont(family))
+        finally:
+            self.family_combo.blockSignals(blok)
 
     def update_size_label(self, size: float) -> None:
         self.current_size = size
@@ -281,6 +317,13 @@ class DragHandleLabel(_HandleLabel):
         if moved is None:
             return
         dx, dy = moved
+        # Shift: ofis programlarındaki gibi baskın eksende kal, diğerini
+        # sabitle. Küçük hareketlerde yön belirsiz olduğu için kilit yok.
+        if event.modifiers() & Qt.ShiftModifier and max(abs(dx), abs(dy)) >= AXIS_LOCK_PX:
+            if abs(dx) >= abs(dy):
+                dy = 0
+            else:
+                dx = 0
         # Piksel deltası tam sayıya yuvarlanır; böylece widget konumu ile
         # pdf_rect arasında yuvarlama kayması birikmez.
         self.owner.move_by_pixels(dx, dy, self._start_rect)
@@ -344,12 +387,14 @@ class InlineCanvasTextWidget(QWidget):
             bold=default_style.bold,
             italic=default_style.italic,
             align=0,
+            source_font=default_style.source_font,
         )
         self._toolbar_below = False
         self._box_rect = QRect()
 
         self.toolbar = FloatingMiniToolbar(self.style, self)
         self.toolbar.fontSizeChanged.connect(self._on_font_size_changed)
+        self.toolbar.familyChanged.connect(self._on_family_changed)
         self.toolbar.colorChanged.connect(self._on_color_changed)
         self.toolbar.boldToggled.connect(self._on_bold_toggled)
         self.toolbar.italicToggled.connect(self._on_italic_toggled)
@@ -473,6 +518,15 @@ class InlineCanvasTextWidget(QWidget):
 
     def _on_font_size_changed(self, size: float) -> None:
         self.style.size = float(size)
+        self._apply_style()
+
+    def _on_family_changed(self, family: str) -> None:
+        if not family or family == self.style.family:
+            return
+        self.style.family = family
+        # Kullanıcı bilerek başka bir yazı tipi seçti; belgedeki özgün fontu
+        # yeniden kullanma isteği burada düşer, yoksa seçim yok sayılırdı.
+        self.style.source_font = None
         self._apply_style()
 
     def _on_color_changed(self, color: QColor) -> None:
@@ -655,6 +709,7 @@ class InlineCanvasTextWidget(QWidget):
                 bold=self.style.bold,
                 italic=self.style.italic,
                 align=0,
+                source_font=self.style.source_font,
             ),
             origin=(x0, y0 + self.baseline_offset_pt()),
             line_height=self.line_height_pt(),

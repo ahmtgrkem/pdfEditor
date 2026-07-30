@@ -6,15 +6,18 @@ paketine eklenecek megabaytları) getirmekten hem küçük hem de tam denetimli.
 
 Dönüşümün kapsamı bilinçlidir:
 
-* Metin blokları paragraf olur; blok içindeki satırlar birleştirilir ki Word
-  metni kendi genişliğine göre yeniden sarabilsin (satır satır aktarmak
-  düzenlemeyi imkânsız hâle getiriyor).
+* Metin blokları sayfadaki **konumlarına** yerleştirilir (``w:framePr``,
+  sayfa kenarına göre mutlak). Akışa dizmek sayfayı soldan alt alta bir
+  liste hâline getiriyor, form belgeleri tanınmaz oluyordu.
+* Blok içindeki satırlar birleştirilir; sarma genişliği bloğun kendi
+  genişliğidir, yani satır bölümleri özgününe yakın kalır.
 * Punto, kalın/yatık ve renk korunur; yazı tipi adı da taşınır.
-* Ortalanmış görünen bloklar ortalanır — başlıkların düzeni bozulmasın.
+* Çizgiler ve dolu/çerçeveli dikdörtgenler (form alan kutuları, tablo
+  çizgileri) VML şekilleri olarak metnin **altına** çizilir.
 * **Metni olmayan sayfa** (taranmış belge) boş geçilmez: sayfa görüntüsü
   gömülür, böylece hiçbir içerik kaybolmaz.
-* Sütun/tablo yapısı ve tam sayfa yerleşimi korunmaz; amaç birebir kopya
-  değil, üzerinde çalışılabilir bir Word belgesidir.
+* Eğri/karmaşık vektör çizimler ve gerçek tablo yapısı taşınmaz; metin
+  yine de düzenlenebilir kutular hâlindedir.
 """
 from __future__ import annotations
 
@@ -30,16 +33,19 @@ TWIPS_PER_PT = 20                 # 1 punto = 20 twip
 EMU_PER_PT = 12700                # 1 punto = 12700 EMU
 #: Taranmış sayfa görüntüsünün çözünürlüğü
 IMAGE_DPI = 150
-#: Bir blok, sayfanın ortasına bu kadar yakınsa ve bu orandan darsa ortalanır
-CENTER_TOLERANCE = 0.06
-CENTER_MAX_WIDTH = 0.75
+#: Metin kutusuna verilen pay: Word'ün satır sarması PDF'inkiyle birebir
+#: değil, blok genişliği kılı kılına verilirse son kelime alta düşüyor.
+BOX_SLACK_PT = 4.0
+#: Bundan ince çizimler saç teli gibi çizilir; Word'ün en ince kalemi
+HAIRLINE_PT = 0.4
 
 _NS = (
     'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
     'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
     'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
     'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
-    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"'
+    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" '
+    'xmlns:v="urn:schemas-microsoft-com:vml"'
 )
 
 _CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -98,9 +104,84 @@ def _run(text: str, size: float, bold: bool, italic: bool,
     )
 
 
-def _paragraph(runs: str, center: bool = False) -> str:
-    hiza = '<w:pPr><w:jc w:val="center"/></w:pPr>' if center else ""
-    return f"<w:p>{hiza}{runs}</w:p>"
+def _paragraph(runs: str, box: tuple[float, float, float, float] | None = None) -> str:
+    """``box`` verilirse paragraf sayfada o konuma sabitlenir (punto)."""
+    if box is None:
+        return f"<w:p>{runs}</w:p>"
+    x0, y0, x1, y1 = box
+    cerceve = (
+        '<w:framePr w:hAnchor="page" w:vAnchor="page" w:wrap="none" '
+        f'w:x="{int(max(x0, 0) * TWIPS_PER_PT)}" '
+        f'w:y="{int(max(y0, 0) * TWIPS_PER_PT)}" '
+        f'w:w="{int(max(x1 - x0 + BOX_SLACK_PT, 1) * TWIPS_PER_PT)}" '
+        f'w:h="{int(max(y1 - y0, 1) * TWIPS_PER_PT)}" w:hRule="auto"/>'
+    )
+    # Word'ün varsayılan paragraf boşluğu kutuları aşağı kaydırır; sıfırlanır.
+    aralik = '<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>'
+    return f"<w:p><w:pPr>{cerceve}{aralik}</w:pPr>{runs}</w:p>"
+
+
+def _shape_style(x0: float, y0: float, w: float, h: float) -> str:
+    return (
+        f"position:absolute;left:{x0:.1f}pt;top:{y0:.1f}pt;"
+        f"width:{max(w, 0):.1f}pt;height:{max(h, 0):.1f}pt;z-index:-1;"
+        "mso-position-horizontal-relative:page;"
+        "mso-position-vertical-relative:page"
+    )
+
+
+def _hex(color) -> str | None:
+    """PyMuPDF rengi (0-1 üçlüsü) -> ``#rrggbb``; renk yoksa ``None``."""
+    if not color:
+        return None
+    try:
+        r, g, b = (max(0, min(255, int(round(c * 255)))) for c in color[:3])
+    except (TypeError, ValueError):
+        return None
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def _drawing_shapes(page) -> str:
+    """Sayfadaki çizgi ve dikdörtgenleri VML şekillerine çevirir.
+
+    Form belgelerinde alan kutuları ve tablo çizgileri metnin değil çizim
+    katmanının parçasıdır; aktarılmazsa Word'de yalnızca havada duran
+    etiketler kalıyor.
+    """
+    parcalar: list[str] = []
+    try:
+        cizimler = page.get_drawings()
+    except Exception:  # noqa: BLE001 - bozuk içerik akışı
+        return ""
+    for cizim in cizimler:
+        kontur = _hex(cizim.get("color"))
+        dolgu = _hex(cizim.get("fill"))
+        if not kontur and not dolgu:
+            continue
+        kalinlik = max(float(cizim.get("width") or 0) or HAIRLINE_PT, HAIRLINE_PT)
+        ozellik = (
+            (f'fillcolor="{dolgu}" ' if dolgu else 'filled="f" ')
+            + (f'strokecolor="{kontur}" strokeweight="{kalinlik:.2f}pt" '
+               if kontur else 'stroked="f" ')
+        )
+        for oge in cizim.get("items", []):
+            if oge[0] == "re":
+                r = oge[1]
+                parcalar.append(
+                    f'<v:rect style="{_shape_style(r.x0, r.y0, r.width, r.height)}"'
+                    f" {ozellik}/>"
+                )
+            elif oge[0] == "l" and kontur:
+                p1, p2 = oge[1], oge[2]
+                x0, y0 = min(p1.x, p2.x), min(p1.y, p2.y)
+                parcalar.append(
+                    f'<v:line style="{_shape_style(x0, y0, abs(p2.x - p1.x), abs(p2.y - p1.y))}"'
+                    f' from="{p1.x:.1f}pt,{p1.y:.1f}pt" to="{p2.x:.1f}pt,{p2.y:.1f}pt"'
+                    f' strokecolor="{kontur}" strokeweight="{kalinlik:.2f}pt"/>'
+                )
+    if not parcalar:
+        return ""
+    return f"<w:p><w:r><w:pict>{''.join(parcalar)}</w:pict></w:r></w:p>"
 
 
 def _page_break() -> str:
@@ -129,7 +210,7 @@ def _image_paragraph(index: int, width_pt: float, height_pt: float) -> str:
     )
 
 
-def _block_paragraph(block: dict, page_width: float) -> str:
+def _block_paragraph(block: dict, page_width: float = 0.0) -> str:
     """Bir metin bloğunu tek paragrafa çevirir."""
     parcalar: list[str] = []
     for satir_no, satir in enumerate(block.get("lines", [])):
@@ -159,14 +240,7 @@ def _block_paragraph(block: dict, page_width: float) -> str:
         return ""
 
     bayraklar = int(ilk.get("flags", 0))
-    kutu = block.get("bbox", (0, 0, 0, 0))
-    genislik = kutu[2] - kutu[0]
-    merkez = (kutu[0] + kutu[2]) / 2
-    ortali = (
-        page_width > 0
-        and genislik < page_width * CENTER_MAX_WIDTH
-        and abs(merkez - page_width / 2) < page_width * CENTER_TOLERANCE
-    )
+    kutu = block.get("bbox", None)
     return _paragraph(
         _run(
             metin,
@@ -176,7 +250,7 @@ def _block_paragraph(block: dict, page_width: float) -> str:
             int(ilk.get("color", 0)),
             str(ilk.get("font", "")).split("+")[-1].split("-")[0],
         ),
-        center=ortali,
+        box=tuple(float(v) for v in kutu) if kutu else None,
     )
 
 
@@ -209,6 +283,11 @@ def export_docx(doc: PdfDocument, out_path: str,
                 ) if p
             ]
             if paragraflar:
+                # Şekiller önce: z-index negatif olsa da Word'de akışta
+                # önde gelen kutu, sonrakileri aşağı itmesin diye başta durur.
+                sekiller = _drawing_shapes(sayfa)
+                if sekiller:
+                    govde.append(sekiller)
                 govde.extend(paragraflar)
                 continue
             # Metin yok (taranmış sayfa): görüntüsü gömülür.

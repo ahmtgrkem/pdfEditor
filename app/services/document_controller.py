@@ -283,6 +283,36 @@ class DocumentController(QObject):
             self.undo_silently()
         return ok
 
+    # -- sayfadaki görseller --------------------------------------------
+    def image_at(self, page: int, point) -> dict | None:
+        if not self.is_open:
+            return None
+        return ann.image_at_point(self.document, page, point)
+
+    def page_images(self, page: int) -> list[dict]:
+        if not self.is_open:
+            return []
+        return ann.list_images(self.document, page)
+
+    def move_image(self, page: int, rect, new_rect, xref: int,
+                   front: bool = True, label: str = "Görsel taşıma") -> bool:
+        ok = False
+        with self.edit(label, page=page):
+            ok = ann.move_image(self.document, page, rect, new_rect, xref,
+                                front=front)
+        if not ok:
+            self.undo_silently()
+            self.message.emit("Görsel taşınamadı.")
+        return ok
+
+    def remove_image(self, page: int, rect) -> bool:
+        ok = False
+        with self.edit("Görsel silme", page=page):
+            ok = ann.remove_image(self.document, page, rect)
+        if not ok:
+            self.undo_silently()
+        return ok
+
     def add_watermark(self, opts: ann.WatermarkOptions) -> int:
         count = 0
         with self.edit("Filigran", structural=True):

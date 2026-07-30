@@ -209,6 +209,47 @@ def sample_png(tmp_path_factory):
     return path
 
 
+#: ``image_pdf``teki görselin yerleştirildiği alan (punto)
+IMAGE_RECT = (200.0, 300.0, 320.0, 380.0)
+
+
+@pytest.fixture
+def image_pdf(tmp_path):
+    """Metin, çizgi ve tek bir görsel içeren sayfa.
+
+    Görsel düzenleme testleri için: taşıma/silme metni ve çizimi bozmamalı.
+    """
+    import io
+
+    from PIL import Image
+
+    tampon = io.BytesIO()
+    Image.new("RGB", (120, 80), (200, 30, 30)).save(tampon, "PNG")
+
+    path = tmp_path / "gorselli.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 700), "Bu metin kalmali", fontsize=12)
+    page.insert_image(fitz.Rect(*IMAGE_RECT), stream=tampon.getvalue())
+    page.draw_line(fitz.Point(50, 600), fitz.Point(300, 600),
+                   color=(0, 0, 1), width=2)
+    doc.save(str(path))
+    doc.close()
+    return str(path)
+
+
+@pytest.fixture
+def opened_image(window, image_pdf, qapp):
+    """``image_pdf`` açılmış, seçim aracı etkin pencere."""
+    from app.ui.tools import Tool
+
+    assert window.open_path(image_pdf) is True
+    for _ in range(8):
+        qapp.processEvents()
+    window.tools.set_tool(Tool.SELECT)
+    return window
+
+
 # ======================================================================
 # Yardımcılar
 # ======================================================================
@@ -236,15 +277,16 @@ def page_view_pos(view, page_index: int, x_pt: float, y_pt: float):
 
 
 def mouse_drag(view, start, end, steps: int = 6, release: bool = True,
-               button=None):
+               button=None, modifiers=None):
     """Görünüm üzerinde gerçek QMouseEvent'lerle fare sürüklemesi simüle eder."""
     from PySide6.QtCore import QEvent, QPointF
     from PySide6.QtGui import QMouseEvent
 
     button = button or Qt.LeftButton
+    modifiers = Qt.NoModifier if modifiers is None else modifiers
 
     def send(kind, pos, buttons):
-        event = QMouseEvent(kind, QPointF(pos), button, buttons, Qt.NoModifier)
+        event = QMouseEvent(kind, QPointF(pos), button, buttons, modifiers)
         if kind == QEvent.MouseButtonPress:
             view.mousePressEvent(event)
         elif kind == QEvent.MouseMove:
@@ -269,3 +311,17 @@ def drag_on_page(view, page_index: int, p1: tuple, p2: tuple, **kwargs) -> None:
     start = page_view_pos(view, page_index, *p1)
     end = page_view_pos(view, page_index, *p2)
     mouse_drag(view, start, end, **kwargs)
+
+
+def click_page(view, page_index: int, x_pt: float, y_pt: float) -> None:
+    """Sayfadaki punto koordinatına tek tıklama."""
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    pos = page_view_pos(view, page_index, x_pt, y_pt)
+    view.mousePressEvent(QMouseEvent(
+        QEvent.MouseButtonPress, QPointF(pos), Qt.LeftButton,
+        Qt.LeftButton, Qt.NoModifier))
+    view.mouseReleaseEvent(QMouseEvent(
+        QEvent.MouseButtonRelease, QPointF(pos), Qt.LeftButton,
+        Qt.NoButton, Qt.NoModifier))

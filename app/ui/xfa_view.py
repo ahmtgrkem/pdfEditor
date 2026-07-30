@@ -354,6 +354,26 @@ class XfaFormView(QWidget):
         # edilir; kaydetme sessizce boş veri yazmamalı.
         return sonuc or dict(self._values)
 
+    def export_pdf_blocking(self, path: str, timeout_ms: int = 60000) -> bool:
+        """:meth:`export_pdf`'i bekleyerek çalıştırır.
+
+        Word'e aktarma eşzamanlı bir akış (yol seç -> yaz -> mesaj) olduğu
+        için burada :meth:`values_blocking` ile aynı iç içe döngü kullanılır.
+        """
+        from PySide6.QtCore import QEventLoop, QTimer
+
+        sonuc = {"ok": False}
+        dongu = QEventLoop(self)
+
+        def bitti(basarili: bool) -> None:
+            sonuc["ok"] = bool(basarili)
+            dongu.quit()
+
+        self.export_pdf(path, bitti)
+        QTimer.singleShot(timeout_ms, dongu.quit)
+        dongu.exec()
+        return sonuc["ok"]
+
     def export_pdf(self, path: str, callback) -> None:
         """Görünenin birebir aynısını PDF'e basar.
 

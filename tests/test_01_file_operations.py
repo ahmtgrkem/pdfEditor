@@ -119,6 +119,35 @@ class TestExportFormats:
         assert govde.count('w:type="page"') == 5, "Sayfa başına bir sayfa sonu"
         assert "<w:sectPr>" in govde, "Sayfa ölçüsü tanımlanmalı"
 
+    def test_word_ciktisi_yerlesimi_korur(self, window, tmp_path):
+        """Metin sayfadaki konumuna oturmalı, kutular da taşınmalı.
+
+        Akışa dizilirse form belgeleri soldan alt alta bir listeye dönüşüyor.
+        """
+        import zipfile
+
+        from app.core.docx_export import export_docx
+
+        kaynak = tmp_path / "yerlesim.pdf"
+        doc = fitz.open()
+        sayfa = doc.new_page()
+        sayfa.draw_rect(fitz.Rect(200, 300, 400, 320), color=(0, 0, 0))
+        sayfa.insert_text((205, 315), "Sagda", fontsize=11)
+        doc.save(str(kaynak))
+        doc.close()
+        assert window.open_path(str(kaynak)) is True
+
+        hedef = tmp_path / "yerlesim.docx"
+        export_docx(window.controller.document, str(hedef))
+        with zipfile.ZipFile(hedef) as paket:
+            govde = paket.read("word/document.xml").decode("utf-8")
+
+        assert "<v:rect" in govde, "Çizilen dikdörtgen aktarılmalı"
+        assert 'w:hAnchor="page"' in govde, "Metin sayfaya sabitlenmeli"
+        # 205 punto ~ 4100 twip: soldan başlamamalı.
+        x = int(govde.split('w:vAnchor="page" w:wrap="none" w:x="')[1].split('"')[0])
+        assert x > 3500, f"Metin yatay konumu kaybolmuş (x={x})"
+
     def test_word_ciktisinda_metinsiz_sayfa_gorsel_olur(self, window, qapp, tmp_path):
         """Taranmış sayfa boş geçilmemeli: sayfa görüntüsü gömülür."""
         import zipfile

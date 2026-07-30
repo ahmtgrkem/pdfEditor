@@ -314,7 +314,27 @@ class TestKisayollar:
             "Tek sayfalı belgede sayfa silme pasif olmalı"
         )
 
-    @pytest.mark.xfail(reason="Seçili açıklamayı Delete ile silme kısayolu yok",
-                       strict=True)
-    def test_delete_secili_nesneyi_siler(self, opened):
-        assert "delete_selection" in opened._actions
+    def test_delete_secili_nesneyi_siler(self, opened_image, qapp):
+        """Seçili görsel menü komutuyla da silinebilmeli."""
+        from conftest import click_page
+
+        assert not opened_image._actions["delete_selection"].isEnabled(), (
+            "Seçim yokken silme komutu pasif olmalı"
+        )
+        click_page(opened_image.view, 0, 260.0, 340.0)
+        pump(qapp)
+        assert opened_image._actions["delete_selection"].isEnabled()
+
+        opened_image._actions["delete_selection"].trigger()
+        pump(qapp)
+        assert opened_image.controller.page_images(0) == []
+
+    def test_z_sirasi_komutlari_secime_bagli(self, opened_image, qapp):
+        from conftest import click_page
+
+        for anahtar in ("bring_front", "send_back"):
+            assert not opened_image._actions[anahtar].isEnabled()
+        click_page(opened_image.view, 0, 260.0, 340.0)
+        pump(qapp)
+        for anahtar in ("bring_front", "send_back"):
+            assert opened_image._actions[anahtar].isEnabled()

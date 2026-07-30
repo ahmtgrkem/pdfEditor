@@ -41,6 +41,43 @@ def make_widget(zoom: float, size: float, x0: float = 100.0, y0: float = 200.0,
     return widget
 
 
+class TestYaziTipiSecici:
+    def test_raster_fontlar_listelenmez(self, qapp):
+        """Windows'un eski raster fontları seçilebilir olmamalı.
+
+        DirectWrite onları çizemiyor (liste açılınca konsol uyarı yağıyordu)
+        ve PDF'e de gömülemedikleri için seçilmeleri anlamsız.
+        """
+        from PySide6.QtWidgets import QFontComboBox
+
+        widget = make_widget(1.0, 12.0)
+        try:
+            combo = widget.toolbar.family_combo
+            assert combo.fontFilters() == QFontComboBox.FontFilter.ScalableFonts
+
+            # Offscreen platformda font veritabanı boştur; dolu olduğunda
+            # (gerçek pencere yöneticisiyle) içerik de denetlenir.
+            aileler = {combo.itemText(i) for i in range(combo.count())}
+            if not aileler:
+                pytest.skip("offscreen: font veritabanı boş")
+            for raster in ("Fixedsys", "MS Sans Serif", "MS Serif",
+                           "Small Fonts", "System", "Terminal"):
+                assert raster not in aileler, f"{raster} listelenmemeli"
+        finally:
+            widget.deleteLater()
+
+    def test_secilen_aile_stile_yansir(self, qapp):
+        widget = make_widget(1.0, 12.0)
+        try:
+            assert widget.style.family == "Arial"
+            widget.toolbar.familyChanged.emit("Georgia")
+            assert widget.style.family == "Georgia"
+            # Kullanıcı bilerek seçti: belgedeki özgün font artık dayatılmamalı.
+            assert widget.style.source_font is None
+        finally:
+            widget.deleteLater()
+
+
 # ======================================================================
 # 4.1 Punto ve DPI ölçekleme
 # ======================================================================

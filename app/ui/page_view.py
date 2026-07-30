@@ -41,6 +41,39 @@ PAGE_MARGIN = 26
 MIN_ZOOM = 0.08
 MAX_ZOOM = 8.0
 ZOOM_STEPS = [0.10, 0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0]
+#: Bir görselin küçültülebileceği en küçük kenar (punto)
+MIN_IMAGE_SIZE = 6.0
+#: Ok tuşlarıyla kaydırma adımı (punto); Shift ile büyük adım
+NUDGE_PT = 1.0
+NUDGE_BIG_PT = 10.0
+#: Shift ile eksen kilidinin devreye gireceği en küçük hareket (punto).
+#: Altında yön belirsizdir; kilit uygulanırsa tutamak zıplıyor.
+AXIS_LOCK_DEADZONE = 3.0
+
+
+def _unchanged(info: dict, result) -> bool:
+    """Düzenleyiciden çıkan sonuç, açılıştaki metin ve biçimle aynı mı?
+
+    Aynıysa belgeye hiç dokunulmaz. ``size`` kıyası toleranslıdır: punto
+    belgeden okunurken yuvarlanıyor ve birebir eşitlik neredeyse hiç
+    tutmuyordu.
+
+    Metin normalize edilerek kıyaslanır: PDF'ler kelime aralarında bölünmez
+    boşluk (U+00A0) tutuyor, ``QTextEdit.toPlainText()`` ise onları düz
+    boşluğa çeviriyor. Ham kıyas bu yüzden **hiçbir zaman** tutmuyordu.
+    """
+    from ..core.document import normalize_text
+
+    stil = result.style
+    return (
+        normalize_text(result.text) == normalize_text(info.get("text", ""))
+        and stil.family == info.get("font")
+        and bool(stil.bold) is bool(info.get("bold"))
+        and bool(stil.italic) is bool(info.get("italic"))
+        and abs(float(stil.size) - float(info.get("size", 0.0))) < 0.05
+        and all(abs(a - b) < 1 / 255
+                for a, b in zip(stil.color, info.get("color", (0, 0, 0))))
+    )
 
 
 class ViewMode(str, Enum):
@@ -159,6 +192,8 @@ class PdfView(FileDropMixin, QGraphicsView):
     requestText = Signal(int, object)       # page, QRectF (punto)
     requestImage = Signal(int, object)
     requestSignature = Signal(int, object)
+    #: Sayfa görseli seçildi/bırakıldı — menü komutlarının etkinliği için
+    imageSelectionChanged = Signal(bool)
 
     def __init__(self, controller: DocumentController, tools: ToolState, parent=None) -> None:
         super().__init__(parent)
@@ -210,6 +245,16 @@ class PdfView(FileDropMixin, QGraphicsView):
         self._form_field: FormField | None = None
         #: İmleç şu an bir form alanının üzerinde mi
         self._form_cursor_on = False
+        #: Seçili sayfa görseli: ``{"page", "xref", "rect"}`` (rect sayfa pt)
+        self._image_sel: dict | None = None
+        #: Sürükleme durumu: ``{"handle", "start", "orig"}``; handle None = taşıma
+        self._image_drag: dict | None = None
+        #: Sürükleme sırasında Shift basılı mı (eksen kilidi)
+        self._shift_drag = False
+        #: Belgedeki font adı -> düzenleyicide gösterilecek ``(aile, kalın)``
+        self._doc_font_cache: dict[str, tuple[str, bool]] = {}
+        #: Gömülü font dosyası -> Qt'ye yüklenmiş aile adı
+        self._qt_font_cache: dict[str, str | None] = {}
         #: Form alanı üzerinde gezinirken imleç değişsin
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -239,6 +284,7 @@ class PdfView(FileDropMixin, QGraphicsView):
     def rebuild(self) -> None:
         """Belge yapısı değiştiğinde sahneyi sıfırdan kurar."""
         self._discard_live_text_widget()
+        self.clear_image_selection()
         self._scene.clear()
         self._items.clear()
         if not self.controller.is_open:
@@ -644,8 +690,31 @@ class PdfView(FileDropMixin, QGraphicsView):
                 return
         super().wheelEvent(event)
 
+    #: Ok tuşu -> (dx, dy) yönü
+    _ARROW_DIRS = {
+        Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0),
+        Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1),
+    }
+
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
+        # Seçili görselin kısayolları her şeyden önce; Delete'in sayfa
+        # kaydırmaya gitmesi kullanıcıyı şaşırtıyor.
+        if self._image_sel is not None:
+            if key in (Qt.Key_Delete, Qt.Key_Backspace):
+                self.delete_selected_image()
+                event.accept()
+                return
+            if key in self._ARROW_DIRS:
+                adim = NUDGE_BIG_PT if event.modifiers() & Qt.ShiftModifier else NUDGE_PT
+                dx, dy = self._ARROW_DIRS[key]
+                self.move_selected_object(dx * adim, dy * adim)
+                event.accept()
+                return
+            if key == Qt.Key_Escape:
+                self.clear_image_selection()
+                event.accept()
+                return
         if key == Qt.Key_Space and not event.isAutoRepeat():
             self._space_pan = True
             self.viewport().setCursor(Qt.OpenHandCursor)
@@ -687,6 +756,10 @@ class PdfView(FileDropMixin, QGraphicsView):
         if self._live_text_widget is not None:
             self.commit_live_text_widget()
         self._cancel_drag()
+        # Seçim yalnızca seçim aracında anlamlı; başka araca geçince
+        # tutamaklar ekranda kalıp çizimi engelliyordu.
+        if _tool is not Tool.SELECT:
+            self.clear_image_selection()
         self._sync_cursor()
 
     def _sync_cursor(self) -> None:
@@ -739,6 +812,9 @@ class PdfView(FileDropMixin, QGraphicsView):
         self._drag_page = None
         self._strokes.clear()
         self._selection_rect = None
+        # Yarım kalan görsel sürüklemesi de bırakılır; yoksa Esc'ten sonraki
+        # ilk fare bırakması görseli hayalet bir konuma taşıyordu.
+        self._image_drag = None
         self.viewport().update()
 
     # ==================================================================
@@ -834,6 +910,200 @@ class PdfView(FileDropMixin, QGraphicsView):
         editor.hide()
         editor.deleteLater()
 
+    # ==================================================================
+    # Sayfadaki görselin seçilmesi / taşınması / boyutlandırılması
+    # ==================================================================
+    #: Tutamak karesinin ekran boyu (px)
+    HANDLE_PX = 9
+    #: Tutamak sırası: (yatay, dikey) 0=sol/üst 1=orta 2=sağ/alt
+    HANDLE_SPOTS = ((0, 0), (1, 0), (2, 0), (0, 1), (2, 1), (0, 2), (1, 2), (2, 2))
+
+    @property
+    def selected_image(self) -> dict | None:
+        return self._image_sel
+
+    def selection_handles(self) -> list[QRectF]:
+        """Seçili görselin tutamakları — sahne koordinatında, çizim sırasıyla."""
+        kutu = self._selected_scene_rect()
+        if kutu is None:
+            return []
+        kenar = self.HANDLE_PX
+        xs = (kutu.left(), kutu.center().x(), kutu.right())
+        ys = (kutu.top(), kutu.center().y(), kutu.bottom())
+        return [
+            QRectF(xs[ix] - kenar / 2, ys[iy] - kenar / 2, kenar, kenar)
+            for ix, iy in self.HANDLE_SPOTS
+        ]
+
+    def _selected_scene_rect(self) -> QRectF | None:
+        if self._image_sel is None:
+            return None
+        sayfa = self._image_sel["page"]
+        if not (0 <= sayfa < len(self._items)):
+            return None
+        return self._scene_rect_for(self._items[sayfa], self._image_sel["rect"])
+
+    def select_image_at(self, item: PageItem, pt: QPointF) -> bool:
+        """Noktadaki görseli seçer; yoksa seçimi bırakır."""
+        gorsel = self.controller.image_at(item.index, (pt.x(), pt.y()))
+        if gorsel is None:
+            return self.clear_image_selection()
+        x0, y0, x1, y1 = gorsel["rect"]
+        self._image_sel = {
+            "page": item.index,
+            "xref": gorsel["xref"],
+            "rect": QRectF(x0, y0, x1 - x0, y1 - y0),
+        }
+        self.viewport().update()
+        self.imageSelectionChanged.emit(True)
+        return True
+
+    def clear_image_selection(self) -> bool:
+        if self._image_sel is None:
+            return False
+        self._image_sel = None
+        self._image_drag = None
+        self.viewport().update()
+        self.imageSelectionChanged.emit(False)
+        return False
+
+    def _handle_at(self, scene_pos: QPointF) -> int | None:
+        for sira, tutamak in enumerate(self.selection_handles()):
+            # Küçük tutamakları yakalamak zor; isabet alanı biraz genişletilir.
+            if tutamak.adjusted(-2, -2, 2, 2).contains(scene_pos):
+                return sira
+        return None
+
+    def _begin_image_drag(self, scene_pos: QPointF, pt: QPointF) -> bool:
+        """Görsel seçiliyken tutamağa/görselin içine basıldıysa sürüklemeyi başlatır."""
+        if self._image_sel is None:
+            return False
+        tutamak = self._handle_at(scene_pos)
+        if tutamak is None and not self._image_sel["rect"].contains(pt):
+            return False
+        self._image_drag = {
+            "handle": tutamak,
+            "start": QPointF(pt),
+            "orig": QRectF(self._image_sel["rect"]),
+        }
+        return True
+
+    def _resize_rect(self, orig: QRectF, spot: tuple[int, int],
+                     dx: float, dy: float) -> QRectF:
+        """Tutamağa göre yeni dikdörtgen; köşelerde en/boy oranı korunur."""
+        sol, ust, sag, alt = orig.left(), orig.top(), orig.right(), orig.bottom()
+        yatay, dikey = spot
+        if yatay == 0:
+            sol += dx
+        elif yatay == 2:
+            sag += dx
+        if dikey == 0:
+            ust += dy
+        elif dikey == 2:
+            alt += dy
+
+        yeni = QRectF(QPointF(sol, ust), QPointF(sag, alt)).normalized()
+        if yatay != 1 and dikey != 1 and orig.width() > 0:
+            # Köşe tutamağı: oran korunur, karşı köşe sabit kalır.
+            oran = orig.height() / orig.width()
+            genislik = max(yeni.width(), MIN_IMAGE_SIZE)
+            yukseklik = genislik * oran
+            x = yeni.left() if yatay == 2 else yeni.right() - genislik
+            y = yeni.top() if dikey == 2 else yeni.bottom() - yukseklik
+            yeni = QRectF(x, y, genislik, yukseklik)
+        return yeni
+
+    def _axis_lock(self, dx: float, dy: float) -> str:
+        """Shift basılıyken kilitlenecek eksen: ``"x"``, ``"y"`` ya da ``""``.
+
+        Ofis programlarındaki davranış: baskın yönde hareket sürer, diğeri
+        sabitlenir. Küçük hareketlerde yön henüz belli olmadığı için kilit
+        uygulanmaz; aksi hâlde tutamak elde titriyor.
+        """
+        if not self._shift_drag or max(abs(dx), abs(dy)) < AXIS_LOCK_DEADZONE:
+            return ""
+        return "x" if abs(dx) >= abs(dy) else "y"
+
+    def _image_drag_rect(self) -> QRectF | None:
+        """Sürükleme sırasındaki önizleme dikdörtgeni (sayfa pt)."""
+        if self._image_sel is None or self._image_drag is None:
+            return None
+        orig: QRectF = self._image_drag["orig"]
+        bas: QPointF = self._image_drag["start"]
+        dx = self._drag_current.x() - bas.x()
+        dy = self._drag_current.y() - bas.y()
+        sira = self._image_drag["handle"]
+        if sira is None:
+            # Shift: yatay ya da dikey hizada kal.
+            eksen = self._axis_lock(dx, dy)
+            if eksen == "x":
+                dy = 0.0
+            elif eksen == "y":
+                dx = 0.0
+            return orig.translated(dx, dy)
+        return self._resize_rect(orig, self.HANDLE_SPOTS[sira], dx, dy)
+
+    def move_selected_object(self, dx: float, dy: float) -> bool:
+        """Seçili görseli ``(dx, dy)`` punto kaydırır (klavye okları da kullanır)."""
+        if self._image_sel is None:
+            return False
+        hedef = self._image_sel["rect"].translated(dx, dy)
+        return self._commit_image_rect(hedef)
+
+    def _commit_image_rect(self, hedef: QRectF, front: bool | None = None) -> bool:
+        """Yeni dikdörtgeni belgeye yazar ve seçimi yeni yerine taşır."""
+        secim = self._image_sel
+        if secim is None:
+            return False
+        hedef = hedef.normalized()
+        if hedef.width() < MIN_IMAGE_SIZE or hedef.height() < MIN_IMAGE_SIZE:
+            return False
+        eski = secim["rect"]
+        onde = True if front is None else front
+        etiket = "Görsel taşıma" if front is None else (
+            "Görseli öne getir" if front else "Görseli arkaya gönder"
+        )
+        ok = self.controller.move_image(
+            secim["page"],
+            (eski.left(), eski.top(), eski.right(), eski.bottom()),
+            (hedef.left(), hedef.top(), hedef.right(), hedef.bottom()),
+            secim["xref"], front=onde, label=etiket,
+        )
+        if not ok:
+            return False
+        # Taşıma sonrası görselin xref'i değişir; seçim yeni yerleşimden
+        # tazelenir, yoksa ikinci sürükleme eski xref'i arar ve başarısız olur.
+        yeni = self.controller.image_at(
+            secim["page"], (hedef.center().x(), hedef.center().y())
+        )
+        if yeni is None:
+            self.clear_image_selection()
+        else:
+            x0, y0, x1, y1 = yeni["rect"]
+            self._image_sel = {
+                "page": secim["page"], "xref": yeni["xref"],
+                "rect": QRectF(x0, y0, x1 - x0, y1 - y0),
+            }
+        self.viewport().update()
+        return True
+
+    def bring_selected_image(self, front: bool) -> bool:
+        """Seçili görseli metnin önüne (``True``) ya da arkasına alır."""
+        if self._image_sel is None:
+            return False
+        return self._commit_image_rect(QRectF(self._image_sel["rect"]), front=front)
+
+    def delete_selected_image(self) -> bool:
+        secim = self._image_sel
+        if secim is None:
+            return False
+        kutu = secim["rect"]
+        ok = self.controller.remove_image(
+            secim["page"], (kutu.left(), kutu.top(), kutu.right(), kutu.bottom())
+        )
+        self.clear_image_selection()
+        return ok
+
     # -- fare ----------------------------------------------------------
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MiddleButton or self._space_pan or self.tools.tool is Tool.HAND:
@@ -873,9 +1143,26 @@ class PdfView(FileDropMixin, QGraphicsView):
         # Form alanları yalnızca seçim aracındayken etkileşimlidir; aksi hâlde
         # alanın üzerine açıklama eklemek imkânsız olurdu.
         if self.tools.tool is Tool.SELECT:
+            # Seçili görselin tutamağı/gövdesi her şeyden önce gelir: aksi
+            # hâlde altındaki form alanı tıklamayı kapıp sürüklemeyi engelliyor.
+            if self._begin_image_drag(scene_pos, pt):
+                self._drag_page = item
+                self._drag_start = pt
+                self._drag_current = pt
+                self._dragging = True
+                event.accept()
+                return
             if self._form_editor is not None:
                 self.close_form_editor()
             if self._handle_form_click(item, pt):
+                event.accept()
+                return
+            if self.select_image_at(item, pt):
+                self._drag_page = item
+                self._drag_start = pt
+                self._drag_current = pt
+                self._dragging = True
+                self._begin_image_drag(scene_pos, pt)
                 event.accept()
                 return
 
@@ -905,6 +1192,7 @@ class PdfView(FileDropMixin, QGraphicsView):
             scene_pos = self.mapToScene(event.position().toPoint())
             pt = self._clamp_to_page(self._drag_page, self._to_page_pt(self._drag_page, scene_pos))
             self._drag_current = pt
+            self._shift_drag = bool(event.modifiers() & Qt.ShiftModifier)
             if self.tools.tool is Tool.PENCIL and self._strokes:
                 last = self._strokes[-1][-1]
                 if (pt - last).manhattanLength() >= 1.2:
@@ -957,6 +1245,17 @@ class PdfView(FileDropMixin, QGraphicsView):
             super().mouseReleaseEvent(event)
             return
 
+        if self._image_drag is not None:
+            hedef = self._image_drag_rect()
+            self._image_drag = None
+            self._dragging = False
+            self._drag_page = None
+            if hedef is not None and hedef != self._image_sel["rect"]:
+                self._commit_image_rect(hedef)
+            self.viewport().update()
+            event.accept()
+            return
+
         item = self._drag_page
         rect = self._drag_rect_pt()
         tool = self.tools.tool
@@ -989,6 +1288,83 @@ class PdfView(FileDropMixin, QGraphicsView):
     # ==================================================================
     # Canlı metin düzenleyici
     # ==================================================================
+    def _register_document_font(self, page: int, raw_font: str | None) -> str | None:
+        """Belgedeki gömülü fontu Qt font veritabanına ekler, aile adını verir.
+
+        Fontu **tam** gömen belgelerde (Word/LibreOffice çıktıları) çalışır:
+        düzenleyici metni sayfadakinin ta kendisiyle gösterir. Alt küme
+        gömen belgelerde (akademik PDF'lerin çoğu) Qt dosyayı reddeder —
+        adsız/cmap'siz alt küme ya da çıplak CFF yükleyemez — ve ``None``
+        döner; o zaman kurulu ailelerden en yakınına düşülür. Yazılan çıktı
+        her iki durumda da özgün fontu korur (bkz. ``embedded_fontfile``).
+
+        Aynı dosya ikinci kez yüklenmez: ``addApplicationFont`` her çağrıda
+        yeni bir kimlik üretir ve font listesi kopyalarla şişer.
+        """
+        if not raw_font or not self.controller.is_open:
+            return None
+
+        from PySide6.QtGui import QFontDatabase
+
+        from ..core import annotations as ann
+
+        yol = ann.embedded_font_path(self.controller.document, page, raw_font)
+        if yol is None:
+            return None
+        if yol in self._qt_font_cache:
+            return self._qt_font_cache[yol]
+
+        self._qt_font_cache[yol] = None      # tekrar denenmesin
+        kimlik = QFontDatabase.addApplicationFont(yol)
+        if kimlik < 0:
+            return None
+        aileler = QFontDatabase.applicationFontFamilies(kimlik)
+        if aileler:
+            self._qt_font_cache[yol] = aileler[0]
+        return self._qt_font_cache[yol]
+
+    def _display_style(self, page: int, info: dict) -> tuple[str, bool]:
+        """Düzenleyicinin ekranda kullanacağı ``(aile, kalın)`` çifti.
+
+        Aile için sırayla denenir; ilk tutan kazanır:
+
+        1. Belgenin **kendi** fontu Qt'ye yüklenebiliyorsa (fontu tam gömen
+           belgeler) sayfadakinin ta kendisi kullanılır.
+        2. Font adı kurulu bir aileyle eşleşiyorsa o aile.
+        3. Hiçbiri olmuyorsa gömülü fontun **harf genişlikleri** ölçülüp en
+           yakın kurulu aile bulunur. Ada bakarak tahmin yürütmek serif
+           belgeleri sans gösteriyordu; ölçü fontun kendi verisidir.
+
+        Kalınlık, span'ın bayrağı söylemiyorsa gömülü fontun **mürekkep
+        yoğunluğu** ölçülerek bulunur: ``FormataOTFMd`` gibi ara ağırlıklar
+        ne bayrakta ne adında "bold" taşıyor, ekranda ince görünüyordu.
+        """
+        from ..core import annotations as ann
+        from ..core import fonts
+
+        ham = info.get("raw_font")
+        varsayilan = (info.get("font", fonts.DEFAULT_FAMILY),
+                      bool(info.get("bold", False)))
+        if not ham:
+            return varsayilan
+
+        onbellek = self._doc_font_cache.get(ham)
+        if onbellek is not None:
+            return onbellek
+
+        yol = ann.embedded_font_path(self.controller.document, page, ham)
+        aile = self._register_document_font(page, ham) or fonts.match(ham, "")
+        if not aile and yol:
+            aile = fonts.closest_by_metrics(yol)
+        aile = aile or varsayilan[0]
+
+        kalin = varsayilan[1]
+        if not kalin and yol:
+            kalin = fonts.looks_bold(yol, info.get("text", ""))
+
+        self._doc_font_cache[ham] = (aile, kalin)
+        return aile, kalin
+
     def start_inline_editing(self, item: PageItem, info: dict) -> None:
         """Var olan bir metin span'ını canlı düzenleyiciye yükler.
 
@@ -1001,13 +1377,19 @@ class PdfView(FileDropMixin, QGraphicsView):
 
         self._discard_live_text_widget()
 
+        aile, kalin = self._display_style(item.index, info)
         style = TextStyle(
-            family=info.get("font", fonts.DEFAULT_FAMILY),
+            family=aile,
             size=float(info.get("size", 14.0)),
             color=info.get("color", (0.0, 0.0, 0.0)),
-            bold=bool(info.get("bold", False)),
+            bold=kalin,
             italic=bool(info.get("italic", False)),
+            # Belgedeki özgün font adı; yazılırken önce bu font denenir.
+            source_font=info.get("raw_font"),
         )
+        # Karşılaştırma açılıştaki biçimle yapılmalı, yoksa hiçbir şey
+        # değiştirilmese bile "biçim değişti" sanılıp metin yeniden yazılır.
+        info = {**info, "font": style.family, "bold": style.bold}
         rect = info.get("rect") or (0.0, 0.0, 0.0, 0.0)
         origin = info.get("origin")
         if origin is not None:
@@ -1103,6 +1485,15 @@ class PdfView(FileDropMixin, QGraphicsView):
         self._discard_live_text_widget()
 
         self.tools.defaults.text = result.style
+        if info is not None and _unchanged(info, result):
+            # Çift tıklayıp hiçbir şey değiştirmeden çıkmak belgeye
+            # dokunmamalı. Yeniden yazmak metni redaksiyonla silip tekrar
+            # kuruyor; harf aralıkları ve bağ (ligature) bilgisi kayboluyor,
+            # gömülü font yeniden kullanılamazsa yazı tipi de değişiyordu.
+            self.tools.set_tool(Tool.SELECT)
+            self.viewport().update()
+            return
+
         if info is not None:
             # Var olan metnin üzerine yazılıyor: önce eskisini temizle.
             ok = self.controller.replace_text(
@@ -1253,8 +1644,12 @@ class PdfView(FileDropMixin, QGraphicsView):
                 painter.setBrush(QColor(theme.current().selection))
                 painter.drawRect(self._scene_rect_for(item, self._selection_rect))
 
+        self._draw_image_selection(painter)
+
         if not (self._dragging and self._drag_page is not None):
             return
+        if self._image_drag is not None:
+            return          # görsel sürüklemesinin önizlemesi yukarıda çizildi
 
         item = self._drag_page
         tool = self.tools.tool
@@ -1314,6 +1709,61 @@ class PdfView(FileDropMixin, QGraphicsView):
             painter.setBrush(QColor(theme.current().selection))
             painter.drawRect(scene_rect)
 
+    def _draw_axis_guide(self, painter: QPainter, item: PageItem,
+                         onizleme: QRectF) -> None:
+        """Shift kilidi etkinken hizayı gösteren kılavuz çizgi.
+
+        Ofis programlarındaki gibi: kilitlenen eksen boyunca sayfayı boydan
+        boya kesen ince bir çizgi, nesnenin nereye hizalandığını gösterir.
+        """
+        if self._image_drag is None or self._image_drag["handle"] is not None:
+            return
+        bas: QPointF = self._image_drag["start"]
+        eksen = self._axis_lock(self._drag_current.x() - bas.x(),
+                                self._drag_current.y() - bas.y())
+        if not eksen:
+            return
+        genislik, yukseklik = item.pixel_size()
+        merkez = self._scene_rect_for(item, onizleme).center()
+        kalem = QPen(QColor("#E53935"), 1.0, Qt.DashLine)
+        painter.setPen(kalem)
+        painter.setBrush(Qt.NoBrush)
+        if eksen == "x":
+            painter.drawLine(QPointF(item.pos().x(), merkez.y()),
+                             QPointF(item.pos().x() + genislik, merkez.y()))
+        else:
+            painter.drawLine(QPointF(merkez.x(), item.pos().y()),
+                             QPointF(merkez.x(), item.pos().y() + yukseklik))
+
+    def _draw_image_selection(self, painter: QPainter) -> None:
+        """Seçili görselin çerçevesi, tutamakları ve sürükleme önizlemesi."""
+        if self._image_sel is None:
+            return
+        sayfa = self._image_sel["page"]
+        if not (0 <= sayfa < len(self._items)):
+            return
+        vurgu = QColor(theme.current().accent)
+
+        onizleme = self._image_drag_rect() if self._image_drag is not None else None
+        if onizleme is not None:
+            item = self._items[sayfa]
+            self._draw_axis_guide(painter, item, onizleme)
+            painter.setPen(QPen(vurgu, 1.2, Qt.DashLine))
+            painter.setBrush(QColor(vurgu.red(), vurgu.green(), vurgu.blue(), 40))
+            painter.drawRect(self._scene_rect_for(item, onizleme))
+
+        kutu = self._selected_scene_rect()
+        if kutu is None:
+            return
+        painter.setPen(QPen(vurgu, 1.4, Qt.DashLine))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(kutu)
+
+        painter.setPen(QPen(QColor("#FFFFFF"), 1))
+        painter.setBrush(vurgu)
+        for tutamak in self.selection_handles():
+            painter.drawRect(tutamak)
+
     def _preview_fill(self) -> QBrush:
         fill = self.tools.defaults.fill
         if fill is None:
@@ -1359,7 +1809,21 @@ class PdfView(FileDropMixin, QGraphicsView):
         item = self._item_at_scene(scene_pos)
         page = item.index if item else self._current
 
+        # Sağ tık görselin üzerindeyse önce onu seç: menü seçili nesneye göre
+        # kurulur, kullanıcı ayrıca sol tıklamak zorunda kalmasın.
+        if item is not None and self.tools.tool is Tool.SELECT:
+            nokta = self._to_page_pt(item, scene_pos)
+            if self._image_sel is None or not self._image_sel["rect"].contains(nokta):
+                self.select_image_at(item, nokta)
+
         menu = QMenu(self)
+        act_front = act_back = act_img_del = None
+        if self._image_sel is not None:
+            act_front = menu.addAction("Görseli öne getir")
+            act_back = menu.addAction("Görseli arkaya gönder (metnin altına)")
+            act_img_del = menu.addAction(icons.icon("eraser"), "Görseli sil")
+            menu.addSeparator()
+
         act_copy = menu.addAction(icons.icon("copy"), "Seçili metni kopyala")
         act_copy.setEnabled(bool(self._selection_rect))
         menu.addSeparator()
@@ -1370,7 +1834,15 @@ class PdfView(FileDropMixin, QGraphicsView):
         act_del = menu.addAction(icons.icon("page_delete"), "Sayfayı sil")
 
         chosen = menu.exec(event.globalPos())
-        if chosen is act_copy:
+        if chosen is None:
+            return
+        if chosen is act_front:
+            self.bring_selected_image(True)
+        elif chosen is act_back:
+            self.bring_selected_image(False)
+        elif chosen is act_img_del:
+            self.delete_selected_image()
+        elif chosen is act_copy:
             self.copy_selection()
         elif chosen is act_cw:
             self.controller.rotate([page], 90)
