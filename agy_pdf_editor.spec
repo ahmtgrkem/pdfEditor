@@ -68,6 +68,8 @@ try:
         "**/resources/*.pak",
         "**/resources/*.dat",
         "**/translations/qtwebengine_locales/*",
+        # Standart Qt diyaloglarının Türkçesi (bkz. app.main.install_translations)
+        "**/translations/qtbase_tr.qm",
     ])
 except Exception:
     pass

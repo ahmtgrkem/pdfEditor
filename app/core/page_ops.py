@@ -187,6 +187,51 @@ def extract_pages(doc: PdfDocument, indices: Sequence[int], out_path: str) -> st
     return out_path
 
 
+def open_source(path: str, password: str | None = None):
+    """Birleştirme/ekleme için kaynak belgeyi açar.
+
+    Dinamik XFA formlarının sayfa akışı tek bir "bu belgeyi görmek için Adobe
+    Reader gerekir" uyarı sayfasından oluşur; form içeriği gömülü XML
+    şablonundadır. Böyle bir dosya olduğu gibi birleştirilirse çıktıya form
+    değil o uyarı sayfası giriyordu. Bu yüzden şablon statik sayfalara
+    çizilir (Araçlar ▸ Formu görüntüle ile aynı çizim) ve o belge döndürülür.
+
+    Çağıran döndürülen belgeyi ``close()`` etmelidir.
+    """
+    doc = fitz.open(path)
+    try:
+        if doc.needs_pass and not (password and doc.authenticate(password)):
+            raise PdfError(f"Parola gerekiyor: {os.path.basename(path)}")
+
+        from . import xfa
+
+        if not xfa.is_dynamic(doc):
+            return doc
+
+        from . import xfa_render
+
+        packets = xfa.read_packets(doc)
+        if "template" not in packets:
+            return doc
+        template = xfa.packet_data(doc, packets["template"])
+        values = xfa.read_values(
+            xfa.packet_data(doc, packets["datasets"]) if "datasets" in packets else b""
+        )
+        try:
+            data = xfa_render.render_bytes(template, values)
+        except Exception:  # noqa: BLE001 - olağandışı şablon: uyarı sayfasına düş
+            return doc
+        rendered = fitz.open(stream=data, filetype="pdf")
+        if rendered.page_count == 0:
+            rendered.close()
+            return doc
+    except Exception:
+        doc.close()
+        raise
+    doc.close()
+    return rendered
+
+
 def merge_documents(
     sources: Sequence[tuple[str, str | None, str]],
     out_path: str,
@@ -200,10 +245,8 @@ def merge_documents(
     out = fitz.open()
     try:
         for path, password, ranges in sources:
-            src = fitz.open(path)
+            src = open_source(path, password)
             try:
-                if src.needs_pass and not (password and src.authenticate(password)):
-                    raise PdfError(f"Parola gerekiyor: {os.path.basename(path)}")
                 picks = parse_page_ranges(ranges, src.page_count)
                 for i in picks:
                     out.insert_pdf(src, from_page=i, to_page=i)

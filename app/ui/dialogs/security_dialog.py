@@ -11,10 +11,10 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
-    QVBoxLayout,
 )
 
 from ...core.exporter import SecurityOptions
+from .. import theme
 from .common import BaseDialog, PathPicker
 
 
@@ -34,7 +34,7 @@ class PasswordPrompt(BaseDialog):
         self.content.addWidget(self.field)
         if retry:
             warn = QLabel("Parola hatalı, tekrar deneyin.", self)
-            warn.setStyleSheet("color: #ef5350;")
+            warn.setStyleSheet(f"color: {theme.current().danger};")
             self.content.addWidget(warn)
         self.field.setFocus()
 

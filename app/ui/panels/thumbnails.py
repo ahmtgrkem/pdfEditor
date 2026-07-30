@@ -59,6 +59,19 @@ class ThumbnailList(FileDropMixin, QListWidget):
             self.orderChanged.emit(after)
 
 
+def _page_icon(pixmap: QPixmap) -> QIcon:
+    """Önizlemeyi seçildiğinde de olduğu gibi gösteren simge.
+
+    Qt, seçili öğelerin simgesini ``Selected`` kipinde ister ve karşılığı
+    verilmezse vurgu rengiyle boyar: sayfa görüntüsü maviye çalıyordu.
+    """
+    result = QIcon()
+    result.addPixmap(pixmap, QIcon.Normal, QIcon.Off)
+    result.addPixmap(pixmap, QIcon.Selected, QIcon.Off)
+    result.addPixmap(pixmap, QIcon.Active, QIcon.Off)
+    return result
+
+
 class ThumbnailPanel(QWidget):
     """Sayfa önizlemeleri ve sayfa yönetimi."""
 
@@ -111,7 +124,7 @@ class ThumbnailPanel(QWidget):
             return
         placeholder = self._placeholder()
         for i in range(self.controller.page_count):
-            item = QListWidgetItem(QIcon(placeholder), str(i + 1))
+            item = QListWidgetItem(_page_icon(placeholder), str(i + 1))
             item.setData(INDEX_ROLE, i)
             item.setTextAlignment(Qt.AlignHCenter)
             item.setSizeHint(QSize(THUMB_WIDTH + 18, int(THUMB_WIDTH * 1.5) + 30))
@@ -150,7 +163,7 @@ class ThumbnailPanel(QWidget):
         for i in range(self.list.count()):
             item = self.list.item(i)
             if item.data(INDEX_ROLE) == index:
-                item.setIcon(QIcon(pixmap))
+                item.setIcon(_page_icon(pixmap))
                 return
 
     def _refresh_page(self, index: int) -> None:

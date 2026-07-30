@@ -34,15 +34,14 @@ class TestComboBoxlar:
                     f"'{ad}' düzenlenebilir ama girdi doğrulayıcısı yok"
                 )
 
-    @pytest.mark.parametrize("diyalog", ["text", "watermark", "export", "compress",
+    @pytest.mark.parametrize("diyalog", ["watermark", "export", "compress",
                                          "split", "security"])
     def test_diyalog_combolari_salt_secim(self, opened, diyalog):
         from app.ui.dialogs import (CompressDialog, ExportImagesDialog, SecurityDialog,
-                                    SplitDialog, TextDialog, WatermarkDialog)
+                                    SplitDialog, WatermarkDialog)
 
         ctrl = opened.controller
         uretici = {
-            "text": lambda: TextDialog(TextStyle(), opened),
             "watermark": lambda: WatermarkDialog(ctrl.page_count, 0, opened),
             "export": lambda: ExportImagesDialog(ctrl.page_count, 0, ctrl.path, opened),
             "compress": lambda: CompressDialog(ctrl.path, 1024, opened),
@@ -158,6 +157,78 @@ class TestPanellerVeTema:
         assert opened.controller.page_count == sayfa
         assert "tema" in opened.controller.document.page_text(0)
         opened.toggle_theme()
+
+    @pytest.mark.parametrize("tema", ["dark", "light"])
+    def test_stil_sayfasi_bastan_sona_uygulanir(self, qapp, tema):
+        """Gösterge görselleri dosyadan gelmeli ve kurallar düşmemeli.
+
+        Qt'nin stil sayfasında ``url()`` yalnızca dosya yolu kabul eder;
+        ``data:`` URI verildiğinde ayrıştırıcı o satırda bozulur ve
+        **sonraki tüm kurallar sessizce düşer** — düğmeler, kaydırma
+        çubukları, onay kutuları temasız kalır. Bu test hem göstergelerin
+        dosyada olduğunu hem de sayfanın sonundaki kuralların hâlâ
+        uygulandığını doğrular.
+        """
+        import os
+        import re
+
+        from PySide6.QtWidgets import QPushButton
+
+        palet = theme.THEMES[tema]
+        sayfa = theme.stylesheet(palet)
+
+        assert "data:image" not in sayfa, "QSS 'data:' URI desteklemiyor"
+        yollar = re.findall(r'url\("([^"]+)"\)', sayfa)
+        assert yollar, "Gösterge görselleri tanımlanmalı"
+        for yol in yollar:
+            assert os.path.exists(yol), f"Gösterge dosyası yok: {yol}"
+
+        # Kural sırasının sonundaki bir bildirim: sayfa baştan sona ayrıştıysa
+        # vurgu düğmesi vurgu rengine boyanır.
+        onceki = qapp.styleSheet()
+        try:
+            qapp.setStyleSheet(sayfa)
+            dugme = QPushButton("Uygula")
+            dugme.setProperty("accent", "true")
+            dugme.resize(140, 34)
+            dugme.show()
+            pump(qapp)
+            renk = dugme.grab().toImage().pixelColor(6, 17)
+            dugme.close()
+        finally:
+            qapp.setStyleSheet(onceki)
+        assert renk.name().lower() == palet.accent.lower(), (
+            f"Vurgu düğmesi {palet.accent} olmalı, {renk.name()} çizildi — "
+            "stil sayfasının son kuralları düşmüş olabilir"
+        )
+
+    def test_diyalogun_onay_dugmesi_vurgulu_cizilir(self, qapp):
+        """Birincil eylem gerçekten vurgu renginde boyanmalı.
+
+        ``accent`` özelliği yalnızca cilalama sırasında okunuyor; standart
+        ``QDialogButtonBox`` düğmeleri kutunun kurucusunda cilalandığı için
+        özellik hiç işlemiyordu (mavi görünüm ``:default``dan geliyordu, o da
+        odağa göre yanlış düğmeye kayabiliyor).
+        """
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        from app.ui.dialogs.common import BaseDialog
+
+        dialog = BaseDialog("Deneme", ok_text="Uygula")
+        dialog.resize(320, 120)
+        dialog.show()
+        pump(qapp)
+        onay = dialog.buttons.button(QDialogButtonBox.Ok)
+        iptal = dialog.buttons.button(QDialogButtonBox.Cancel)
+        assert onay.isDefault(), "Enter onay düğmesine gitmeli"
+        assert not iptal.isDefault(), "İptal varsayılan düğme olmamalı"
+
+        goruntu = onay.grab().toImage()
+        renk = goruntu.pixelColor(6, goruntu.height() // 2)
+        dialog.close()
+        assert renk.name().lower() == theme.current().accent.lower(), (
+            f"Onay düğmesi vurgu renginde olmalı, {renk.name()} çizildi"
+        )
 
     def test_gorunum_modlari(self, opened, qapp):
         for mod, key in ((ViewMode.SINGLE, "view_single"),

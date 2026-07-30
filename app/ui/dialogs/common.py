@@ -108,10 +108,6 @@ class PageRangeEdit(QWidget):
             return [self.current_page]
         return page_ops.parse_page_ranges(self.edit.text(), self.page_count)
 
-    def set_custom(self, expression: str) -> None:
-        self.combo.setCurrentIndex(2)
-        self.edit.setText(expression)
-
 
 class PathPicker(QWidget):
     """Dosya/klasör seçici satırı."""
@@ -166,9 +162,16 @@ class BaseDialog(QDialog):
         self.content.setSpacing(10)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
-        self.buttons.button(QDialogButtonBox.Ok).setText(ok_text)
-        self.buttons.button(QDialogButtonBox.Ok).setProperty("accent", "true")
-        self.buttons.button(QDialogButtonBox.Cancel).setText("İptal")
+        onay = self.buttons.button(QDialogButtonBox.Ok)
+        onay.setText(ok_text)
+        onay.setProperty("accent", "true")
+        theme.repolish(onay)     # özellik seçicisi cilalamada okunur
+        # Enter tuşu onaya gitsin: aksi hâlde Qt varsayılan düğmeyi odağa göre
+        # seçiyor ve iptal düğmesi "default" olabiliyor.
+        onay.setDefault(True)
+        iptal = self.buttons.button(QDialogButtonBox.Cancel)
+        iptal.setText("İptal")
+        iptal.setAutoDefault(False)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
 

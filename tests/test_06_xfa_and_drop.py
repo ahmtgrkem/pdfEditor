@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.core import xfa, xfa_render
 from app.ui.file_drop import dropped_files
+from conftest import pump
 
 # Sürükleme olayları MIME verisinin ömrünü uzatmaz; referans tutulmazsa
 # olay işlenmeden nesne toplanabilir.
@@ -256,6 +257,39 @@ class TestXfaOkuma:
         assert xfa.extract_fields(b"<template bozuk") == []
         assert xfa.extract_fields(b"") == []
         assert xfa.read_values(b"gecersiz") == {}
+
+
+class TestXfaBirlestirme:
+    """Dinamik XFA formu birleştirmede uyarı sayfası değil form gelmeli.
+
+    Dinamik XFA'nın sayfa akışı yalnızca "bu belgeyi görmek için Adobe Reader
+    gerekir" sayfasıdır; olduğu gibi birleştirilirse çıktıya o sayfa giriyordu.
+    """
+
+    def test_birlestirmede_form_cizilir(self, xfa_pdf, second_pdf, tmp_path):
+        from app.core import page_ops
+
+        cikti = tmp_path / "birlesik.pdf"
+        page_ops.merge_documents(
+            [(str(xfa_pdf), None, ""), (str(second_pdf), None, "")], str(cikti)
+        )
+        d = pymupdf.open(str(cikti))
+        try:
+            metin = "\n".join(d.load_page(i).get_text() for i in range(d.page_count))
+        finally:
+            d.close()
+        # Etiketler çizimde bölünmeyen boşlukla yazılır.
+        metin = metin.replace(" ", " ")
+        assert "Ad Soyad" in metin, "Form alanları çıktıda olmalı"
+        assert "Ek belge sayfa 1" in metin, "Diğer belge de eklenmeli"
+
+    def test_acik_belgeye_eklemede_form_cizilir(self, opened, xfa_pdf, qapp):
+        eklenen = opened.controller.append_documents([(str(xfa_pdf), None, "")])
+        pump(qapp)
+        assert eklenen >= 1
+        son = opened.controller.page_count - 1
+        metin = opened.controller.document.page_text(son).replace(" ", " ")
+        assert "Ad Soyad" in metin
 
 
 class TestXfaYazma:

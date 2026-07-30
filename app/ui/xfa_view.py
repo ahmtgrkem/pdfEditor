@@ -14,16 +14,18 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import (
-    QMarginsF, QObject, QSizeF, QTimer, QUrl, Qt, Signal, Slot,
-)
+from PySide6.QtCore import QMarginsF, QObject, QSizeF, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QPageLayout, QPageSize
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
+    QWidget,
+)
 
 from ..core import xfa_html
+from . import theme
 
 #: Yakınlaştırma sınırları
 MIN_ZOOM = 0.25
@@ -108,6 +110,8 @@ class XfaFormView(QWidget):
     status = Signal(str)
     #: Sayfa sayısı değişti (bölüm açılıp kapandıkça değişir)
     pageCountChanged = Signal(int)
+    #: Kullanıcı formu statik (çizilebilir) sayfaya dönüştürmek istedi
+    staticRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -155,7 +159,54 @@ class XfaFormView(QWidget):
 
         yerlesim = QVBoxLayout(self)
         yerlesim.setContentsMargins(0, 0, 0, 0)
-        yerlesim.addWidget(self.web)
+        yerlesim.setSpacing(0)
+        yerlesim.addWidget(self._bilgi_seridi(), 0)
+        yerlesim.addWidget(self.web, 1)
+
+    # ------------------------------------------------------------------
+    def _bilgi_seridi(self) -> QWidget:
+        """Araçların neden çalışmadığını anlatan ve çıkış yolu sunan şerit.
+
+        Etkileşimli formda açıklama/çizim araçları kapalıdır: belge akışı
+        yalnızca "Adobe gerekli" uyarı sayfasıdır, çizim onu değiştirir,
+        formu değil. Kullanıcı bunu araç çubuğundaki solgun düğmelerden
+        anlayamıyordu; şerit hem nedeni hem çözümü söylüyor.
+        """
+        p = theme.current()
+        self.notice = QWidget(self)
+        self.notice.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.notice.setStyleSheet(
+            f"background: {p.surface_alt}; border-bottom: 1px solid {p.border};"
+        )
+        etiket = QLabel(
+            "Etkileşimli form görünümü — alanları doldurabilirsiniz; "
+            "çizim ve açıklama araçları bu görünümde çalışmaz.",
+            self.notice,
+        )
+        etiket.setWordWrap(True)
+        etiket.setStyleSheet(f"color: {p.text}; border: none;")
+        dugme = QPushButton("Çizilebilir sayfaya dönüştür", self.notice)
+        dugme.setToolTip(
+            "Formu, üzerine metin/çizim ekleyebileceğiniz statik bir PDF'e "
+            "dönüştürür (Araçlar ▸ Formu görüntüle ile aynı)."
+        )
+        dugme.clicked.connect(self.staticRequested)
+
+        satir = QHBoxLayout(self.notice)
+        satir.setContentsMargins(12, 7, 12, 7)
+        satir.setSpacing(12)
+        satir.addWidget(etiket, 1)
+        satir.addWidget(dugme)
+        return self.notice
+
+    def refresh_theme(self) -> None:
+        """Tema değişince şeridin renklerini tazeler."""
+        p = theme.current()
+        self.notice.setStyleSheet(
+            f"background: {p.surface_alt}; border-bottom: 1px solid {p.border};"
+        )
+        for etiket in self.notice.findChildren(QLabel):
+            etiket.setStyleSheet(f"color: {p.text}; border: none;")
 
     # ------------------------------------------------------------------
     # Kurulum
@@ -195,9 +246,11 @@ class XfaFormView(QWidget):
     # Yükleme
     # ------------------------------------------------------------------
     def load_template(self, template: bytes,
-                      values: dict[str, str] | None = None) -> int:
+                      values: dict[str, str] | None = None,
+                      font_css: str = "") -> int:
         """Şablonu derleyip gösterir; doldurulabilir alan sayısını döndürür."""
-        derlenmis = xfa_html.compile_template(template, values or {})
+        derlenmis = xfa_html.compile_template(template, values or {},
+                                              font_css=font_css)
         self._field_count = derlenmis.field_count
         self._page_size = derlenmis.page_size
         self._loaded = False

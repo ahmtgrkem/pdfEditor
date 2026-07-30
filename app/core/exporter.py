@@ -1,7 +1,6 @@
 """Dönüştürme ve dışa aktarma araçları: görsel, metin, sıkıştırma, güvenlik."""
 from __future__ import annotations
 
-import io
 import os
 from dataclasses import dataclass
 from typing import Callable, Sequence
@@ -139,19 +138,6 @@ def export_text(doc: PdfDocument, out_path: str, pages: Sequence[int] | None = N
         fh.write("\n".join(chunks))
     return out_path
 
-
-def export_html(doc: PdfDocument, out_path: str, pages: Sequence[int] | None = None) -> str:
-    with doc.lock:
-        total = doc.raw.page_count
-        targets = [i for i in (pages if pages is not None else range(total)) if 0 <= i < total]
-        body = "\n".join(doc.raw.load_page(i).get_text("html") for i in targets)
-    html = (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>{os.path.basename(out_path)}</title></head><body>{body}</body></html>"
-    )
-    with open(out_path, "w", encoding="utf-8") as fh:
-        fh.write(html)
-    return out_path
 
 
 # ----------------------------------------------------------------------

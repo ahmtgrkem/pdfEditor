@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...services.document_controller import DocumentController
-from .. import icons
+from .. import icons, theme
 
 HIT_ROLE = Qt.UserRole + 1
 
@@ -131,7 +131,7 @@ class SearchPanel(QWidget):
 
         self.case_box = QCheckBox("Büyük/küçük harf duyarlı", self)
         self.count_label = QLabel("", self)
-        self.count_label.setStyleSheet("color: palette(placeholder-text);")
+        self.count_label.setStyleSheet(f"color: {theme.current().text_muted};")
 
         options = QHBoxLayout()
         options.addWidget(self.case_box)
@@ -266,7 +266,3 @@ class SearchPanel(QWidget):
         if not self._hits:
             return
         self._activate((self.results.currentRow() - 1) % len(self._hits))
-
-    @property
-    def hit_count(self) -> int:
-        return len(self._hits)

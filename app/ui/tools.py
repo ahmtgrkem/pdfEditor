@@ -27,19 +27,6 @@ class Tool(str, Enum):
     SIGNATURE = "signature"
 
 
-#: Sürükleyerek dikdörtgen seçimi yapan araçlar
-RECT_TOOLS = {
-    Tool.HIGHLIGHT,
-    Tool.UNDERLINE,
-    Tool.STRIKEOUT,
-    Tool.ERASER,
-    Tool.RECT,
-    Tool.ELLIPSE,
-    Tool.TEXT,
-    Tool.IMAGE,
-    Tool.SIGNATURE,
-}
-
 #: İki nokta arası çizen araçlar
 LINE_TOOLS = {Tool.LINE, Tool.ARROW}
 

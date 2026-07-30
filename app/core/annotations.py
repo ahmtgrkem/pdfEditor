@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import io
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
 
 from . import fonts
 from .document import PdfDocument
-from .pdf_backend import Matrix, Point, Quad, Rect, fitz
+from .pdf_backend import Matrix, Point, Rect, fitz
 
 RGB = tuple[float, float, float]
 
@@ -64,16 +64,6 @@ class WatermarkOptions:
     image: bytes | None = None
     image_scale: float = 0.5
 
-
-@dataclass
-class AnnotInfo:
-    """Silgi/seçim için hafif annotation tanımı (görsel koordinatlı)."""
-
-    index: int
-    kind: int
-    type_name: str
-    rect: tuple[float, float, float, float]
-    info: dict = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------
@@ -198,20 +188,6 @@ MIN_BOX_HEIGHT_FACTOR = 1.5
 #: Genişliği verilmemiş kutular için varsayılan genişlik (pt).
 DEFAULT_BOX_WIDTH = 320.0
 
-
-def baseline_origin(
-    visual_rect: tuple[float, float, float, float], style: TextStyle
-) -> tuple[float, float]:
-    """Kutunun sol-üst köşesine oturan metnin taban çizgisi (baseline) noktası.
-
-    ``insert_text`` için ``origin`` noktası metnin *taban çizgisidir*; kutunun
-    üst kenarı değil. Bu yüzden fontun üst çıkıntısı eklenir::
-
-        origin_x = x0
-        origin_y = y0 + ascender * fontsize
-    """
-    asc = fonts.ascender(style.family, style.bold, style.italic)
-    return float(visual_rect[0]), float(visual_rect[1]) + asc * float(style.size)
 
 
 def add_text(
@@ -543,26 +519,6 @@ def add_watermark(doc: PdfDocument, opts: WatermarkOptions) -> int:
 # ----------------------------------------------------------------------
 # Sorgulama / silme
 # ----------------------------------------------------------------------
-def list_annots(doc: PdfDocument, page_index: int) -> list[AnnotInfo]:
-    result: list[AnnotInfo] = []
-    with doc.lock:
-        page = doc.raw.load_page(page_index)
-        for i, annot in enumerate(page.annots()):
-            vrect = annot.rect
-            if page.rotation:
-                vrect = Rect(vrect) * page.rotation_matrix
-                vrect.normalize()
-            result.append(
-                AnnotInfo(
-                    index=i,
-                    kind=annot.type[0],
-                    type_name=annot.type[1],
-                    rect=(vrect.x0, vrect.y0, vrect.x1, vrect.y1),
-                    info=dict(annot.info or {}),
-                )
-            )
-    return result
-
 
 def delete_annot_at(doc: PdfDocument, page_index: int, visual_point: tuple[float, float]) -> bool:
     """Verilen noktadaki (en küçük alanlı) annotation'ı siler."""

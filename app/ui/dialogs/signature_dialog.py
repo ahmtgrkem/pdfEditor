@@ -1,4 +1,4 @@
-﻿"""Serbest imza çizme / kaydetme diyaloğu.
+"""Serbest imza çizme / kaydetme diyaloğu.
 
 Fare veya grafik tablet ile çizilen imza, saydam arka planlı PNG olarak
 üretilir ve belgeye görsel olarak yerleştirilir. Basınç desteği olan
@@ -315,7 +315,7 @@ class SignatureDialog(BaseDialog):
             pixels = img.load()
             for y in range(img.height):
                 for x in range(img.width):
-                    r, g, b, a = pixels[x, y]
+                    r, g, b, _ = pixels[x, y]
                     if r > 235 and g > 235 and b > 235:
                         pixels[x, y] = (r, g, b, 0)
             out = io.BytesIO()

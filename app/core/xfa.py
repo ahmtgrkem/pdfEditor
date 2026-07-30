@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field as dataclass_field
-from typing import Any
 from xml.etree import ElementTree as ET
 
 #: XFA paket dizisindeki ``(ad) xref 0 R`` çiftleri. Üretici araçlar araya
@@ -113,6 +112,172 @@ def is_dynamic(doc) -> bool:
 
 
 # ======================================================================
+# Gömülü yazı tipleri
+# ======================================================================
+#: ``/FontName``daki alt küme öneki (``ABCDEF+``) ve PostScript son ekleri.
+_SUBSET_RE = re.compile(r"^[A-Z]{6}\+")
+#: ``TimesNewRomanPSMT`` -> ``TimesNewRoman``. ``Std``/``Pro`` ailenin parçası
+#: olduğu için burada yok; onları CamelCase ayırıcı sözcüğe böler.
+_PS_SUFFIX_RE = re.compile(r"(?:PSMT|MT|PS)$")
+#: ``MyriadPro-Bold`` -> ``Myriad Pro`` için sözcük sınırı.
+_CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
+
+#: Yazı tipi programının sihirli baytları -> CSS ``format()`` adı.
+#: Bare CFF (Type1C) ve Type1 tarayıcıda kullanılamaz; listede yoktur.
+_FONT_FORMAT = {
+    b"OTTO": "opentype",
+    b"\x00\x01\x00\x00": "truetype",
+    b"true": "truetype",
+    b"ttcf": "truetype",
+    b"wOFF": "woff",
+    b"wOF2": "woff2",
+}
+
+_FONT_DESC_RE = re.compile(
+    r"/FontName\s*/([^\s/>\]]+)|/(FontFile[23]?)\s+(\d+)\s+0\s+R"
+)
+
+
+def _repack_sfnt(veri: bytes) -> bytes:
+    """sfnt tablolarını 4 bayta hizalayıp ``DSIG``i atarak yeniden paketler.
+
+    PDF'e gömülen yazı tipleri tabloları hizalamadan yan yana dizebiliyor.
+    Tarayıcının doğrulayıcısı (OTS) bunu ``CFF : misaligned table`` diye
+    reddediyor ve ``@font-face`` sessizce düşüyordu. İmza tablosu da yeniden
+    yerleşimden sonra geçersiz kalacağı için çıkarılır.
+
+    Bozuk/anlaşılmayan veride girdi olduğu gibi döner; çağıran zaten
+    tarayıcının kabul etmemesine karşı sistem yazı tipine düşüyor.
+    """
+    import struct
+
+    try:
+        sayi = struct.unpack(">H", veri[4:6])[0]
+        if len(veri) < 12 + sayi * 16:
+            return veri
+        tablolar = []
+        for i in range(sayi):
+            etiket, saglama, konum, boy = struct.unpack(
+                ">4sIII", veri[12 + i * 16:28 + i * 16]
+            )
+            if etiket == b"DSIG":
+                continue
+            govde = veri[konum:konum + boy]
+            if len(govde) != boy:
+                return veri
+            tablolar.append((etiket, saglama, govde))
+        if not tablolar:
+            return veri
+    except (struct.error, IndexError):
+        return veri
+
+    tablolar.sort(key=lambda t: t[0])
+    n = len(tablolar)
+    ustu = max(0, n.bit_length() - 1)            # log2(n) tabanı
+    parca = 16 * (1 << ustu)
+    basliklar = [veri[:4], struct.pack(">HHHH", n, parca, ustu,
+                                       n * 16 - parca)]
+    konum = 12 + n * 16
+    dizin, govdeler = [], []
+    for etiket, saglama, govde in tablolar:
+        dizin.append(struct.pack(">4sIII", etiket, saglama, konum, len(govde)))
+        dolgu = (-len(govde)) % 4
+        govdeler.append(govde + b"\0" * dolgu)
+        konum += len(govde) + dolgu
+    return b"".join(basliklar + dizin + govdeler)
+
+
+def _css_font_name(ps_adi: str) -> tuple[str, int, str]:
+    """PostScript adı -> ``(aile, kalınlık, stil)``.
+
+    ``MyriadPro-Bold`` -> ``("Myriad Pro", 700, "normal")``.
+    Şablondaki ``typeface="Myriad Pro"`` ile eşleşmesi gerekir; eşleşmezse
+    gömülü yazı tipi hiç kullanılmaz ve metin genişlikleri kayar.
+    """
+    ad = _SUBSET_RE.sub("", ps_adi)
+    taban, _, stil = ad.partition("-")
+    stil = stil.lower()
+    kalinlik = 700 if "bold" in stil or "black" in stil else 400
+    egik = "italic" if ("italic" in stil or "oblique" in stil or "it" == stil) else "normal"
+    return _CAMEL_RE.sub(" ", _PS_SUFFIX_RE.sub("", taban)).strip(), kalinlik, egik
+
+
+_TYPEFACE_RE = re.compile(rb'typeface="([^"]+)"')
+
+#: Gömülü yazı tiplerinin toplam üst sınırı (base64'e çevrilmiş hâliyle).
+#: ``QWebEngineView.setHtml`` 2 MB'tan büyük içeriği hiç göstermez; formun
+#: kendi HTML'ine de yer kalmalı. Bütçeye sığmayan yazı tipi atlanır ve
+#: sistemdeki karşılığına düşülür — Courier New gibi her Windows'ta bulunan
+#: aileler için görünür bir kayıp yok.
+FONT_BUDGET = 700_000
+
+
+def template_typefaces(template: bytes) -> set[str]:
+    """Şablonun kullandığı yazı tipi adları (küçük harfe indirgenmiş)."""
+    return {a.decode("utf-8", "replace").strip().lower()
+            for a in _TYPEFACE_RE.findall(template or b"")}
+
+
+def embedded_font_css(doc, typefaces: set[str] | None = None) -> str:
+    """Belgeye gömülü yazı tiplerini ``@font-face`` kuralları olarak döndürür.
+
+    Foxit/Adobe formu **gömülü** yazı tipiyle çizer; biz Arial'e düşünce her
+    satır ~%6 genişliyor, etiketler kayıyor ve sarıp taşıyordu. Aynı dosyanın
+    farklı görünmesinin asıl nedeni buydu.
+
+    ``typefaces`` verilirse yalnızca şablonun gerçekten kullandığı aileler
+    gömülür (bkz. :data:`FONT_BUDGET`).
+    """
+    import base64
+
+    kurallar: list[str] = []
+    gorulen: set[tuple[str, int, str]] = set()
+    butce = FONT_BUDGET
+    for xref in range(1, doc.xref_length()):
+        try:
+            nesne = doc.xref_object(xref, compressed=True)
+        except Exception:  # noqa: BLE001
+            continue
+        if "/Type/FontDescriptor" not in nesne.replace(" ", ""):
+            continue
+
+        ps_adi, dosya_xref = "", 0
+        for eslesme in _FONT_DESC_RE.finditer(nesne):
+            if eslesme.group(1):
+                ps_adi = eslesme.group(1)
+            else:
+                dosya_xref = int(eslesme.group(3))
+        if not ps_adi or not dosya_xref:
+            continue
+
+        aile, kalinlik, egik = _css_font_name(ps_adi)
+        if (aile, kalinlik, egik) in gorulen:
+            continue
+        if typefaces is not None and aile.lower() not in typefaces:
+            continue
+
+        veri = packet_data(doc, dosya_xref)
+        bicim = _FONT_FORMAT.get(veri[:4])
+        if not bicim:                       # Type1/bare CFF: tarayıcı açamaz
+            continue
+        if bicim in ("opentype", "truetype"):
+            veri = _repack_sfnt(veri)
+
+        b64 = base64.b64encode(veri).decode("ascii")
+        if len(b64) > butce:
+            continue
+        butce -= len(b64)
+
+        gorulen.add((aile, kalinlik, egik))
+        kurallar.append(
+            f"@font-face{{font-family:'{aile}';font-weight:{kalinlik};"
+            f"font-style:{egik};font-display:block;"
+            f"src:url(data:font/{bicim};base64,{b64}) format('{bicim}')}}"
+        )
+    return "".join(kurallar)
+
+
+# ======================================================================
 # Alanlar
 # ======================================================================
 @dataclass
@@ -126,7 +291,6 @@ class XfaField:
     type: str = "text"
     value: str = ""
     options: list[tuple[str, str]] = dataclass_field(default_factory=list)
-    tooltip: str = ""
 
     @property
     def editable(self) -> bool:
@@ -228,7 +392,6 @@ def extract_fields(template: bytes) -> list[XfaField]:
                         type=tur,
                         value=ilk_deger,
                         options=_options_of(cocuk),
-                        tooltip=cocuk.get("hAlign", ""),
                     )
                 )
             elif etiket in ("subform", "subformSet", "area", "exclGroup"):

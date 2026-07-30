@@ -49,7 +49,6 @@ from .dialogs import (
     SecurityDialog,
     SignatureDialog,
     SplitDialog,
-    TextDialog,
     WatermarkDialog,
 )
 from .dialogs.common import ColorButton
@@ -150,6 +149,9 @@ class MainWindow(QMainWindow):
         self.sidebar_tabs = QTabWidget(self)
         self.sidebar_tabs.setDocumentMode(True)
         self.sidebar_tabs.setIconSize(QSize(18, 18))
+        # Sekme çubuğunun kendi taban çizgisi tema dışı (koyu gri) çiziliyor;
+        # etkin sekmeyi zaten vurgu renkli alt çizgi gösteriyor.
+        self.sidebar_tabs.tabBar().setDrawBase(False)
         self.sidebar_tabs.addTab(self.thumbnails, icons.icon("thumbnails", size=18), "")
         self.sidebar_tabs.addTab(self.outline, icons.icon("bookmark", size=18), "")
         self.sidebar_tabs.addTab(self.search, icons.icon("search", size=18), "")
@@ -533,7 +535,8 @@ class MainWindow(QMainWindow):
         )
         self.zoom_combo.setInsertPolicy(QComboBox.NoInsert)
         self.zoom_combo.addItems(ZOOM_ITEMS)
-        self.zoom_combo.setFixedWidth(150)
+        # En uzun seçenek ("Genişliğe sığdır") kırpılmadan sığmalı.
+        self.zoom_combo.setFixedWidth(186)
         self.zoom_combo.setToolTip("Yakınlaştırma")
         self.zoom_combo.activated.connect(self._on_zoom_combo)
         self.zoom_combo.lineEdit().returnPressed.connect(
@@ -655,7 +658,7 @@ class MainWindow(QMainWindow):
                 "clear_annots", "rotate_cw", "rotate_ccw", "rotate_all_cw",
                 "rotate_all_ccw", "page_add", "page_duplicate", "page_extract",
                 "page_delete", "watermark", "export_images", "export_text",
-                "compress", "copy", "find", "find_next", "find_prev",
+                "compress", "copy", "find", "find_next", "find_prev", "split",
             ):
                 self._actions[key].setEnabled(False)
             for action in self.tool_actions.values():
@@ -789,6 +792,10 @@ class MainWindow(QMainWindow):
             xfa.packet_data(ham, paketler["datasets"])
             if "datasets" in paketler else b""
         )
+        # Belgeye gömülü yazı tipleri: Foxit/Adobe formu bunlarla çizer.
+        # Sistem yazı tipine düşülürse metin genişlikleri sapıyor, etiketler
+        # sarıp taşıyor ve tablo başlıkları satırlardan kayıyor.
+        yazi_css = xfa.embedded_font_css(ham, xfa.template_typefaces(sablon))
 
         if self.xfa_view is None:
             try:
@@ -804,12 +811,13 @@ class MainWindow(QMainWindow):
             self.xfa_view.contentChanged.connect(self._on_xfa_edited)
             self.xfa_view.pageCountChanged.connect(self._on_xfa_pages)
             self.xfa_view.formReady.connect(self._on_xfa_ready)
+            self.xfa_view.staticRequested.connect(self.render_xfa_form)
             self.xfa_view.host.printRequested.connect(self.export_xfa_pdf)
             self.stack.addWidget(self.xfa_view)
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            self.xfa_view.load_template(sablon, degerler)
+            self.xfa_view.load_template(sablon, degerler, yazi_css)
         except Exception as exc:  # noqa: BLE001 - olağandışı şablon
             self.show_message(f"Form derlenemedi: {exc}")
             return
@@ -955,6 +963,14 @@ class MainWindow(QMainWindow):
                     "Bu belgede XFA formu bulunamadı.",
                 )
             return False
+
+        if self.in_xfa_mode:
+            # Canlı görünüme yazılanlar henüz ``datasets`` paketine
+            # işlenmemiş olabilir; çizim kullanıcının gördüğü değerlerle
+            # yapılmalı, yoksa doldurduğu alanlar boş çıkıyor.
+            canli = self.xfa_view.values_blocking()
+            if canli:
+                degerler = {**degerler, **canli}
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -1219,6 +1235,19 @@ class MainWindow(QMainWindow):
     def print_document(self) -> None:
         if not self.controller.is_open:
             return
+        if self.in_xfa_mode:
+            # Belge akışı yalnızca "Adobe gerekli" uyarı sayfasıdır; doğrudan
+            # yazdırmak formu değil o sayfayı bastırıyordu.
+            cevap = QMessageBox.question(
+                self, "Yazdır",
+                "Etkileşimli form doğrudan yazdırılamıyor. Formun görünen "
+                "hâlini PDF'e aktarıp o dosyayı yazdırabilirsiniz.\n\n"
+                "Şimdi PDF'e aktarılsın mı?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if cevap == QMessageBox.Yes:
+                self.export_xfa_pdf()
+            return
         try:
             from PySide6.QtPrintSupport import QPrintDialog, QPrinter
         except ImportError:
@@ -1305,10 +1334,13 @@ class MainWindow(QMainWindow):
         self.sidebar_tabs.setTabIcon(2, icons.icon("search", size=18))
         self.search.btn_prev.setIcon(icons.icon("prev", size=18))
         self.search.btn_next.setIcon(icons.icon("next", size=18))
+        self.search.count_label.setStyleSheet(f"color: {theme.current().text_muted};")
         self.color_stroke.set_color(self.tools.defaults.stroke)
         self.color_fill.set_color(self.tools.defaults.fill)
         self.color_highlight.set_color(self.tools.defaults.highlight)
         self.view.refresh_theme()
+        if self.xfa_view is not None:
+            self.xfa_view.refresh_theme()
         self.thumbnails.refresh_theme()
         self.thumbnails.rebuild()
         self._sync_theme_action()

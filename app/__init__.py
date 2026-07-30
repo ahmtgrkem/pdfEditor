@@ -5,7 +5,7 @@ Kurulum betiği (``installer/*.iss``) ve derleme betiği (``build.ps1``) bu
 değeri buradan okur; elle güncellenmemelidir.
 """
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 __app_name__ = "AGY PDF Editor"
 __app_short_name__ = "AGY PDF"
 __org_name__ = "AGY Software"
@@ -30,14 +30,3 @@ __update_branch__ = "main"
 __update_feed__ = (
     f"https://raw.githubusercontent.com/{__update_repo__}/{__update_branch__}/version.json"
 )
-
-
-def update_download_url(version: str, filename: str) -> str:
-    """``vX.Y.Z`` etiketine yüklenen kurulum dosyasının indirme adresi.
-
-    GitHub release ekleri sabit bir kalıptan servis edilir; adres dosya
-    yüklenmeden önce de bilinir. ``release.ps1`` manifesti bununla üretir.
-    """
-    return (
-        f"https://github.com/{__update_repo__}/releases/download/v{version}/{filename}"
-    )

@@ -59,12 +59,6 @@ class _ImageCache:
             _, victim = self._data.popitem(last=False)
             self._bytes -= victim.sizeInBytes()
 
-    def drop_generation(self, keep_generation: int) -> None:
-        stale = [k for k in self._data if k.generation != keep_generation]
-        for k in stale:
-            self._bytes -= self._data[k].sizeInBytes()
-            del self._data[k]
-
     def clear(self) -> None:
         self._data.clear()
         self._bytes = 0
@@ -122,14 +116,6 @@ class RenderService(QObject):
     @staticmethod
     def _zoom_key(zoom: float) -> int:
         return int(round(zoom * 1000))
-
-    def cached_page(self, index: int, zoom: float) -> QImage | None:
-        key = CacheKey("page", index, self._zoom_key(zoom), self._doc.generation)
-        return self._cache.get(key)
-
-    def cached_thumbnail(self, index: int, width: int) -> QImage | None:
-        key = CacheKey("thumb", index, width, self._doc.generation)
-        return self._cache.get(key)
 
     # ------------------------------------------------------------------
     def request_page(self, index: int, zoom: float) -> QImage | None:

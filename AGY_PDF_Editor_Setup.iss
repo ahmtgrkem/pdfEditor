@@ -78,13 +78,17 @@ Root: HKA; Subkey: "Software\Classes\AGYPDFEditor.Document\shell\open\command"; 
 Root: HKA; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: string; ValueName: "AGYPDFEditor.Document"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associate
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "AGY PDF Editor'ü Çalıştır"; Flags: nowait postinstall skipifsilent
+; ``runasoriginaluser``: Program Files'a kurulumda kurulum yönetici olarak
+; yükselir. Bu bayrak olmadan uygulama **yöneticinin** oturumunda açılır;
+; yönetici ayrı bir hesapsa pencere kullanıcının masaüstünde hiç görünmez
+; ("güncellemeden sonra uygulama geri açılmıyor" şikâyetinin nedeni).
+Filename: "{app}\{#MyAppExeName}"; Description: "AGY PDF Editor'ü Çalıştır"; Flags: nowait postinstall skipifsilent runasoriginaluser
 ; Otomatik güncelleme: uygulama kendi kurulumunu /RESTARTAPP ile başlatır ve
 ; kurulum bitince uygulamayı geri açar. Restart Manager'ın /RESTARTAPPLICATIONS
 ; bayrağına güvenilemez; yalnızca RegisterApplicationRestart ile kaydolmuş
 ; uygulamaları geri açar, Qt uygulaması kaydolmadığı için kapalı kalıyordu.
 ; Bayrak açıkça istendiği için toplu (SCCM/Intune) sessiz kurulumlar etkilenmez.
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: GuncellemeSonrasiBaslat
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: GuncellemeSonrasiBaslat
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"

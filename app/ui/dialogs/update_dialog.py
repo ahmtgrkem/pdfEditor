@@ -46,7 +46,12 @@ class UpdateAvailableDialog(QDialog):
         self.notes = QTextBrowser(self)
         self.notes.setOpenExternalLinks(True)
         self.notes.setMinimumHeight(150)
-        self.notes.setPlainText(info.release_notes or "Bu sürüm için not paylaşılmadı.")
+        # ``version.json``daki notlar Markdown yazılır; ham metin olarak
+        # gösterilirse "### Başlık" ve "- madde" işaretleri okunuyor.
+        if info.release_notes:
+            self.notes.setMarkdown(info.release_notes)
+        else:
+            self.notes.setPlainText("Bu sürüm için not paylaşılmadı.")
 
         self.skip_box = QCheckBox("Bu sürümü atla", self)
         self.skip_box.setToolTip("Bu sürüm için bir daha hatırlatılmaz.")

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -16,9 +17,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QVBoxLayout,
 )
 
+from ...core import page_ops, xfa
 from ...core.pdf_backend import fitz
 from .. import icons
 from .common import BaseDialog
@@ -40,8 +41,13 @@ class MergeDialog(BaseDialog):
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.setColumnWidth(COL_NAME, 380)
+        # Dosya adı sütunu boşluğu doldursun: sabit genişlikte kalınca tablonun
+        # sağında boş bir şerit oluşuyordu.
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        header.setSectionResizeMode(COL_PAGES, QHeaderView.Fixed)
+        header.setSectionResizeMode(COL_RANGE, QHeaderView.Fixed)
         self.table.setColumnWidth(COL_PAGES, 70)
         self.table.setColumnWidth(COL_RANGE, 150)
 
@@ -107,6 +113,7 @@ class MergeDialog(BaseDialog):
 
     def _add_path(self, path: str) -> None:
         password = None
+        dynamic_form = False
         try:
             doc = fitz.open(path)
         except Exception as exc:  # noqa: BLE001
@@ -122,13 +129,31 @@ class MergeDialog(BaseDialog):
                     return
                 password = pwd
             count = doc.page_count
+            dynamic_form = xfa.is_dynamic(doc)
         finally:
             doc.close()
+
+        # Dinamik XFA formu birleştirmede statik sayfalara çizilir; listede de
+        # çizim sonrası gerçek sayfa sayısı görünmeli (bkz. page_ops.open_source).
+        if dynamic_form:
+            try:
+                src = page_ops.open_source(path, password)
+                try:
+                    count = src.page_count
+                finally:
+                    src.close()
+            except Exception:  # noqa: BLE001 - çizilemezse özgün sayfa sayısı kalır
+                dynamic_form = False
 
         row = self.table.rowCount()
         self.table.insertRow(row)
         name_item = QTableWidgetItem(os.path.basename(path))
         name_item.setToolTip(path)
+        if dynamic_form:
+            name_item.setToolTip(
+                f"{path}\n\nEtkileşimli (XFA) form: birleştirmede formun kendisi "
+                "çizilir, 'Adobe Reader gerekli' uyarı sayfası eklenmez."
+            )
         name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
         pages_item = QTableWidgetItem(str(count))
         pages_item.setFlags(pages_item.flags() & ~Qt.ItemIsEditable)

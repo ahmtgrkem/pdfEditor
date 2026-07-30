@@ -16,7 +16,6 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
-    QPixmap,
     QPolygonF,
 )
 from PySide6.QtWidgets import (
@@ -34,7 +33,7 @@ from . import theme
 from .file_drop import FileDropMixin
 from .form_widgets import FormChoiceEditor, FormTextEditor
 from .inline_text_editor import InlineCanvasTextWidget
-from .tools import LINE_TOOLS, RECT_TOOLS, Tool, ToolState
+from .tools import LINE_TOOLS, Tool, ToolState
 
 PAGE_GAP = 18
 PAGE_MARGIN = 26
@@ -604,12 +603,6 @@ class PdfView(FileDropMixin, QGraphicsView):
         )
         self.ensureVisible(scene_rect, 80, 120)
 
-    def clear_search(self) -> None:
-        for item in self._items:
-            item.search_rects = []
-            item.active_rect = None
-            item.update()
-
     # ==================================================================
     # Olaylar
     # ==================================================================
@@ -1083,9 +1076,6 @@ class PdfView(FileDropMixin, QGraphicsView):
         if self._live_text_widget is not None:
             self._live_text_widget.commit()
 
-    #: Geriye dönük ad — çift tıkla açılan düzenleyiciyi onaylar
-    commit_inline_editing = commit_live_text_widget
-
     def _position_inline_text_widget(self) -> None:
         """Widget'ı, ilk karakteri PDF ``(x0, y0)`` noktasına gelecek şekilde koyar."""
         # Kurulum sırasında (QGraphicsView __init__) çağrılabilir.
@@ -1225,10 +1215,6 @@ class PdfView(FileDropMixin, QGraphicsView):
             self.status.emit("Seçili metin panoya kopyalandı.")
             return True
         return False
-
-    def clear_selection(self) -> None:
-        self._selection_rect = None
-        self.viewport().update()
 
     # -- önizleme çizimi -----------------------------------------------
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: N802

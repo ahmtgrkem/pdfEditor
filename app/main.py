@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QLibraryInfo, QLocale, QTimer, QTranslator
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -32,6 +32,27 @@ def app_icon() -> QIcon:
     return icons.icon("new", size=64)
 
 
+def install_translations(app: QApplication) -> QTranslator | None:
+    """Qt'nin hazır iletilerini Türkçeleştirir.
+
+    Arayüz tamamen Türkçe ama standart düğmeler (``Save``/``Discard``),
+    dosya ve renk seçme kutuları Qt'den gelir; çeviri yüklenmezse bu yerler
+    İngilizce kalıyor. Çeviri her ortamda paketlenmiş olmayabilir, bu yüzden
+    yüklenemezse sessizce İngilizceye düşülür.
+
+    Döndürülen nesne çağıranda tutulmalıdır: ``QTranslator`` yok edilirse
+    çeviri de kalkar.
+    """
+    for base in (QLibraryInfo.path(QLibraryInfo.TranslationsPath),
+                 resource_path("PySide6", "translations"),
+                 resource_path("translations")):
+        translator = QTranslator(app)
+        if base and translator.load(QLocale("tr_TR"), "qtbase", "_", base):
+            app.installTranslator(translator)
+            return translator
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
 
@@ -49,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv)
     app.setWindowIcon(app_icon())
+    # Referans tutulur; yerel değişken düşerse çeviri de kalkar.
+    app._tr = install_translations(app)  # noqa: SLF001
 
     settings = AppSettings()
     theme.apply(app, settings.theme)

@@ -51,8 +51,13 @@ DEFAULT_FONT_SIZE = 10.0
 
 #: XFA yazı tipi -> tarayıcıda bulunabilecek karşılığı. Myriad Pro kurulu
 #: olmadığı için ölçüleri en yakın olan yaygın fontlara düşülür.
+#: Şablonun ``typeface`` adı -> CSS yığını. İlk sıra her zaman ailenin kendi
+#: adıdır: belge yazı tipini gömmüşse (bkz. ``xfa.embedded_font_css``) sayfa
+#: onu kullanır, gömmemişse yığındaki en yakın sistem ailesine düşer.
+#: Yedekler *metrik olarak yakın* seçilmelidir; Myriad Pro yerine Arial
+#: konunca satırlar ~%6 uzuyor ve etiketler sarıp taşıyordu.
 _TYPEFACE_CSS = {
-    "myriad pro": "Arial, Helvetica, sans-serif",
+    "myriad pro": "'Myriad Pro', 'Segoe UI', Candara, Arial, sans-serif",
     "courier new": "'Courier New', monospace",
     "courier std": "'Courier New', monospace",
     "times new roman": "'Times New Roman', serif",
@@ -170,6 +175,13 @@ def _rich_text(node: ET.Element) -> str:
     ham = "".join(parcalar)
     ham = re.sub(r"[ \t]+", " ", ham)
     return "\n".join(s.strip() for s in ham.split("\n")).strip()
+
+
+def _column_widths(node: ET.Element) -> list[float] | None:
+    """``layout="table"`` alt formunun ``columnWidths`` ölçüleri (punto)."""
+    ham = (node.get("columnWidths") or "").split()
+    olculer = [parse_measure(p) for p in ham]
+    return olculer or None
 
 
 def _font_css(node: ET.Element, inherited: dict) -> tuple[str, dict]:
@@ -421,10 +433,11 @@ class _Compiler:
         self.values = values
         self.scripts: list[dict] = []
         self.variables: list[dict] = []
-        self.repeats: dict[str, dict] = {}
         self.field_count = 0
         self.warnings: list[str] = []
-        self._uid = 0
+        #: İçinde bulunulan ``layout="table"`` alt formunun sütun genişlikleri.
+        #: Satır hücreleri kendi ``w``leri yerine bunları kullanır.
+        self._cols: list[float] | None = None
         #: ``pageArea`` içindeki sayaç alanlarının ``id`` -> ``ad`` eşlemesi.
         #: Altbilgi metni bunlara ``xfa:embed`` ile atıfta bulunur; bu yüzden
         #: çizimler derlenmeden **önce** toplanır.
@@ -436,10 +449,6 @@ class _Compiler:
                 if _local(cocuk.tag) == "field" and cocuk.get("id"):
                     self.counter_ids[cocuk.get("id")] = cocuk.get("name") or ""
             break
-
-    def next_id(self) -> str:
-        self._uid += 1
-        return f"n{self._uid}"
 
     # -- sayfa ölçüleri -------------------------------------------------
     def page_geometry(self) -> tuple[tuple[float, float], tuple[float, float, float, float]]:
@@ -512,12 +521,23 @@ class _Compiler:
 
     # -- kutu konumu ----------------------------------------------------
     def _box_style(self, node: ET.Element, parent_layout: str,
-                   default_w: float | None) -> str:
+                   default_w: float | None, col_w: float | None = None) -> str:
         x = parse_measure(node.get("x"))
         y = parse_measure(node.get("y"))
         w = parse_measure(node.get("w"))
         h = parse_measure(node.get("h"))
         css: list[str] = []
+
+        # Tablo hücresi: genişliği ``columnWidths`` belirler, hücrenin kendi
+        # ``w``si değil. Şablonlar hücreye tasarım aracından kalma dar bir
+        # ``w`` bırakır (ör. 30mm), gerçek sütun 175mm'dir; sütun yok
+        # sayılınca tablo başlıkları ile satırlar birbirinden kayıyordu.
+        if col_w:
+            olcu = _pt(col_w)
+            genislik = f"flex:0 0 {olcu};width:{olcu};max-width:{olcu};min-width:0"
+            if h:
+                genislik += f";min-height:{_pt(h)}"
+            return f"position:relative;{genislik}"
 
         if parent_layout in ("tb", "table"):
             css.append("position:relative")
@@ -561,14 +581,18 @@ class _Compiler:
 
     # -- düğüm derleme ---------------------------------------------------
     def compile_node(self, node: ET.Element, parent_layout: str, som: str,
-                     inherited: dict, default_w: float | None = None) -> str:
+                     inherited: dict, default_w: float | None = None,
+                     col_w: float | None = None) -> str:
         etiket = _local(node.tag)
         if etiket in _CONTAINERS:
-            return self._container(node, parent_layout, som, inherited, default_w)
+            return self._container(node, parent_layout, som, inherited,
+                                   default_w, col_w)
         if etiket == "field":
-            return self._field(node, parent_layout, som, inherited, default_w)
+            return self._field(node, parent_layout, som, inherited,
+                               default_w, col_w)
         if etiket == "draw":
-            return self._draw(node, parent_layout, som, inherited, default_w)
+            return self._draw(node, parent_layout, som, inherited,
+                              default_w, col_w)
         return ""
 
     def _presence_attrs(self, node: ET.Element) -> tuple[str, str]:
@@ -579,7 +603,8 @@ class _Compiler:
         return varlik, gizle
 
     def _container(self, node: ET.Element, parent_layout: str, som: str,
-                   inherited: dict, default_w: float | None) -> str:
+                   inherited: dict, default_w: float | None,
+                   col_w: float | None = None) -> str:
         etiket = _local(node.tag)
         ad = node.get("name") or ""
         yeni_som = f"{som}.{ad}" if ad else som
@@ -587,19 +612,37 @@ class _Compiler:
         varlik, gizle = self._presence_attrs(node)
 
         yazi_css, miras = _font_css(node, inherited)
-        kutu = self._box_style(node, parent_layout, default_w)
+        kutu = self._box_style(node, parent_layout, default_w, col_w)
         ic = self._container_style(node, duzen)
         kenarlik = _child(node, "border")
         dolgu = _fill_css(kenarlik)
         katman = _overlay(kenarlik)
 
-        genislik = parse_measure(node.get("w")) or default_w
+        genislik = col_w or parse_measure(node.get("w")) or default_w
+
+        # Sütun bağlamı: satırın hücreleri kapsayan tablonun sütunlarını
+        # kullanır; hücrenin *içindeki* iç içe tablolar kendi sütunlarını
+        # kurar, o yüzden bağlam iniş sırasında kaydedilip geri alınır.
+        disaridaki = self._cols
+        self._cols = _column_widths(node) if duzen == "table" else None
+        sutunlar = disaridaki if duzen == "row" else None
+
         parcalar: list[str] = []
+        sutun = 0
         for cocuk in node:
-            if _local(cocuk.tag) in _CONTAINERS + _LEAVES:
-                parcalar.append(
-                    self.compile_node(cocuk, duzen, yeni_som, miras, genislik)
-                )
+            if _local(cocuk.tag) not in _CONTAINERS + _LEAVES:
+                continue
+            hucre_g = None
+            if sutunlar and sutun < len(sutunlar):
+                kapsam = int(cocuk.get("colSpan") or 1)
+                if kapsam < 0:                  # -1: satırın kalan sütunları
+                    kapsam = len(sutunlar) - sutun
+                hucre_g = sum(sutunlar[sutun:sutun + kapsam]) or None
+                sutun += max(kapsam, 1)
+            parcalar.append(
+                self.compile_node(cocuk, duzen, yeni_som, miras, genislik, hucre_g)
+            )
+        self._cols = disaridaki
 
         self.collect_events(node, yeni_som)
 
@@ -626,7 +669,8 @@ class _Compiler:
 
     # -- alan ------------------------------------------------------------
     def _field(self, node: ET.Element, parent_layout: str, som: str,
-               inherited: dict, default_w: float | None) -> str:
+               inherited: dict, default_w: float | None,
+               col_w: float | None = None) -> str:
         ad = node.get("name") or ""
         yeni_som = f"{som}.{ad}" if ad else som
         self.field_count += 1
@@ -634,7 +678,7 @@ class _Compiler:
 
         varlik, gizle = self._presence_attrs(node)
         yazi_css, miras = _font_css(node, inherited)
-        kutu = self._box_style(node, parent_layout, default_w)
+        kutu = self._box_style(node, parent_layout, default_w, col_w)
         ic_bosluk = _margin_css(node)
         metin_css, dikey = _para_css(node)
 
@@ -655,7 +699,11 @@ class _Compiler:
                                 miras, metin_css, dikey)
 
         ui_kenarlik = _child(arayuz, "border") if arayuz is not None else None
-        ui_cerceve = f"{_edge_css(ui_kenarlik)};{_fill_css(ui_kenarlik)}"
+        # Onay kutusunun çerçevesini denetimin kendisi çizer (yuvarlaksa daire
+        # olarak). Hücreye de çizilirse dairenin çevresinde ikinci bir kare
+        # beliriyor; Foxit/Adobe tek çerçeve gösterir.
+        ui_cerceve = ("" if tur == "check"
+                      else f"{_edge_css(ui_kenarlik)};{_fill_css(ui_kenarlik)}")
         katman = _overlay(kenarlik)
         alan_dolgu = _fill_css(kenarlik)
         if alan_dolgu:
@@ -722,7 +770,6 @@ class _Compiler:
                     f' data-on="{esc(acik)}"{isaretli}>')
 
         if tur == "choice":
-            acilir = _child(node, "ui")
             coklu = False
             if arayuz is not None:
                 coklu = (arayuz.get("open") or "") == "multiSelect"
@@ -781,12 +828,13 @@ class _Compiler:
 
     # -- çizim -----------------------------------------------------------
     def _draw(self, node: ET.Element, parent_layout: str, som: str,
-              inherited: dict, default_w: float | None) -> str:
+              inherited: dict, default_w: float | None,
+              col_w: float | None = None) -> str:
         ad = node.get("name") or ""
         yeni_som = f"{som}.{ad}" if ad else som
         varlik, gizle = self._presence_attrs(node)
-        yazi_css, miras = _font_css(node, inherited)
-        kutu = self._box_style(node, parent_layout, default_w)
+        yazi_css, _ = _font_css(node, inherited)
+        kutu = self._box_style(node, parent_layout, default_w, col_w)
         kenarlik = _child(node, "border")
         dolgu = _fill_css(kenarlik)
         katman = _overlay(kenarlik)
@@ -924,15 +972,20 @@ select.xc{height:100%;cursor:pointer;-webkit-appearance:none;appearance:none;
   background-size:3pt 3pt,3pt 3pt;background-repeat:no-repeat}
 .xc:focus{background:#fffbe6}
 .xw:focus-within{outline:1px solid #2f6fd0;outline-offset:0}
-input.xchk{flex:0 0 auto;align-self:center;width:8.5pt;height:8.5pt;margin:0;
-  cursor:pointer;accent-color:#2f6fd0}
+/* Kutu ve düğmeler işletim sisteminin kalın denetimleriyle değil, Foxit/Adobe
+   gibi ince çerçeve + siyah işaretle çizilir; yerel denetim etiketle arasındaki
+   boşluğu yiyor ve satırı şişiriyordu. */
+input.xchk{-webkit-appearance:none;appearance:none;flex:0 0 auto;
+  align-self:center;width:8.5pt;height:8.5pt;margin:0;cursor:pointer;
+  position:relative;border:0.6pt solid #55585f;background:#fff}
+input.xchk:checked::after{content:'';position:absolute;left:2.7pt;top:0.5pt;
+  width:2.6pt;height:5.4pt;border:solid #111;border-width:0 1.1pt 1.1pt 0;
+  transform:rotate(42deg)}
 /* ``checkButton shape="round"`` = birbirini dışlayan seçim; kare çizilirse
    kullanıcı birden çok seçenek işaretlenebilir sanır. */
-input.xchk.round{-webkit-appearance:none;appearance:none;border-radius:50%;
-  border:1px solid #6b7280;background:#fff;position:relative}
-input.xchk.round:checked{border-color:#2f6fd0}
-input.xchk.round:checked::after{content:'';position:absolute;inset:1.6pt;
-  border-radius:50%;background:#2f6fd0}
+input.xchk.round{border-radius:50%}
+input.xchk.round:checked::after{left:1.9pt;top:1.9pt;width:3.9pt;height:3.9pt;
+  border:0;border-radius:50%;background:#111;transform:none}
 button.xbtn{cursor:pointer;background:transparent;border:0;border-radius:inherit;
   height:100%;width:100%;padding:0 1pt;font:inherit;color:inherit;
   display:flex;align-items:center;white-space:nowrap;overflow:hidden}
@@ -978,8 +1031,14 @@ body.printing .xc:focus{background:transparent}
 # Genel arayüz
 # ======================================================================
 def compile_template(template: bytes, values: dict[str, str] | None = None,
-                     runtime_js: str | None = None) -> Compiled:
-    """XFA şablonunu tek parça, kendi kendine yeten bir HTML belgesine derler."""
+                     runtime_js: str | None = None,
+                     font_css: str = "") -> Compiled:
+    """XFA şablonunu tek parça, kendi kendine yeten bir HTML belgesine derler.
+
+    ``font_css``: belgeye gömülü yazı tiplerinin ``@font-face`` kuralları
+    (bkz. :func:`app.core.xfa.embedded_font_css`). Verilmezse sayfa sistem
+    yazı tiplerine düşer ve metin genişlikleri Foxit/Adobe'den sapar.
+    """
     if not template:
         raise ValueError("XFA şablonu boş")
     if runtime_js is None:
@@ -1028,7 +1087,7 @@ def compile_template(template: bytes, values: dict[str, str] | None = None,
     html = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<style>{css}</style></head><body>"
+        f"<style>{font_css}{css}</style></head><body>"
         "<div id='doc'><div id='stage'><div id='pages'></div></div></div>"
         "<div id='toast'></div>"
         f"<template id='furniture'>{sayfa_susleri}</template>"

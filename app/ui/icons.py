@@ -80,7 +80,6 @@ _PATHS: dict[str, str] = {
     "page_duplicate": f'<rect {_S} x="8" y="3" width="13" height="15" rx="2"/><path {_S} d="M16 21H5a2 2 0 0 1-2-2V8"/>',
     "merge": f'<path {_S} d="M8 3v6a4 4 0 0 0 4 4h8"/><path {_S} d="M8 21v-6a4 4 0 0 1 4-4h8"/><path {_S} d="M17 9l3 4-3 4"/>',
     "split": f'<path {_S} d="M20 3v6a4 4 0 0 1-4 4H4"/><path {_S} d="M20 21v-6a4 4 0 0 0-4-4H4"/><path {_S} d="M7 9l-3 4 3 4"/>',
-    "reorder": f'<path {_S} d="M4 7h16M4 12h16M4 17h16"/><path {_S} d="M8 4l-2 3 2 3M16 14l2 3-2 3" opacity="0.6"/>',
 
     # --- araçlar / dönüştürme ---
     "export_image": f'<rect {_S} x="3" y="3" width="18" height="14" rx="2"/><path {_S} d="M3 13l4-4 5 5"/><circle {_F} cx="15.5" cy="8" r="1.5"/><path {_S} d="M12 21h9M17 17l4 4-4 4" transform="translate(0,-4) scale(1,0.6)" opacity="0"/>',
@@ -91,13 +90,9 @@ _PATHS: dict[str, str] = {
     # --- diğer ---
     "theme_dark": f'<path {_S} d="M21 13.5A9 9 0 1 1 10.5 3a7 7 0 0 0 10.5 10.5z"/>',
     "theme_light": f'<circle {_S} cx="12" cy="12" r="4.5"/><path {_S} d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
-    "settings": f'<circle {_S} cx="12" cy="12" r="3"/><path {_S} d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 2.6 7a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H7a1.7 1.7 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V7a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" transform="translate(1.5,1.5) scale(0.87)"/>',
     "bookmark": f'<path {_S} d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>',
     "thumbnails": f'<rect {_S} x="3" y="3" width="7" height="7" rx="1.5"/><rect {_S} x="14" y="3" width="7" height="7" rx="1.5"/><rect {_S} x="3" y="14" width="7" height="7" rx="1.5"/><rect {_S} x="14" y="14" width="7" height="7" rx="1.5"/>',
     "help": f'<circle {_S} cx="12" cy="12" r="9"/><path {_S} d="M9.2 9.2a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.8-2.8 2.8M12 17h.01"/>',
-    "check": f'<path {_S} d="M20 6L9 17l-5-5"/>',
-    "chevron_down": f'<path {_S} d="M6 9l6 6 6-6"/>',
-    "palette": f'<path {_S} d="M12 21a9 9 0 1 1 9-9c0 1.7-1.3 3-3 3h-2a2 2 0 0 0-1.4 3.4A2 2 0 0 1 12 21z"/><circle {_F} cx="7.5" cy="12" r="1.3"/><circle {_F} cx="9.5" cy="8" r="1.3"/><circle {_F} cx="14" cy="7.5" r="1.3"/>',
 }
 
 _cache: dict[tuple[str, str, int], QIcon] = {}
@@ -120,7 +115,15 @@ def _render(body: str, color: str, size: int) -> QPixmap:
 
 
 def icon(name: str, color: str | None = None, size: int = 22) -> QIcon:
-    """İkonu tema rengiyle üretir (basılı/seçili durum için vurgu metni rengi)."""
+    """İkonu tema rengiyle üretir.
+
+    "Açık" (checked) durum **vurgu rengiyle** çizilir; vurgu metni rengiyle
+    değil. Aynı ``QAction``ın simgesi hem araç çubuğunda hem menüde görünür:
+    menü satırının zemini seçili olsa bile nötr kaldığı için beyaz simge
+    kayboluyordu (açık temada onay işaretsiz boş satır olarak görünüyordu).
+    Araç çubuğundaki basılı düğme de bu yüzden dolu vurgu zemini yerine
+    vurgu çerçevesi kullanır (bkz. ``theme.stylesheet``).
+    """
     palette = theme.current()
     color = color or palette.text
     key = (name, color, size)
@@ -136,30 +139,29 @@ def icon(name: str, color: str | None = None, size: int = 22) -> QIcon:
         for scale in (1, 2):
             result.addPixmap(_render(body, color, size * scale), QIcon.Normal, QIcon.Off)
             result.addPixmap(
-                _render(body, palette.accent_text, size * scale), QIcon.Normal, QIcon.On
+                _render(body, palette.accent, size * scale), QIcon.Normal, QIcon.On
             )
             result.addPixmap(
-                _render(body, palette.accent_text, size * scale), QIcon.Active, QIcon.On
+                _render(body, palette.accent, size * scale), QIcon.Active, QIcon.On
             )
             result.addPixmap(
                 _render(body, palette.text_muted, size * scale), QIcon.Disabled, QIcon.Off
             )
+            # Liste/ağaç öğeleri seçildiğinde Qt ``Selected`` kipini kullanır;
+            # satır vurgu rengiyle dolduğu için simge de vurgu metni rengine
+            # geçmelidir (aksi hâlde koyu simge mavi zeminde kayboluyor).
+            result.addPixmap(
+                _render(body, palette.accent_text, size * scale), QIcon.Selected, QIcon.Off
+            )
+            result.addPixmap(
+                _render(body, palette.accent_text, size * scale), QIcon.Selected, QIcon.On
+            )
     _cache[key] = result
     return result
 
-
-def colored_icon(name: str, color: str, size: int = 22) -> QIcon:
-    """Sabit renkli ikon (örn. renk seçici göstergesi)."""
-    body = _PATHS.get(name)
-    if body is None:
-        return QIcon()
-    return QIcon(_render(body, color, size))
 
 
 def clear_cache() -> None:
     """Tema değiştiğinde ikonların yeniden renklendirilmesi için."""
     _cache.clear()
 
-
-def available() -> list[str]:
-    return sorted(_PATHS)

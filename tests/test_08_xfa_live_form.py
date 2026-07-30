@@ -173,6 +173,124 @@ class TestOlcuCevrimi:
 
 
 # ======================================================================
+# Tablo sütunları
+# ======================================================================
+class TestTabloSutunlari:
+    """``layout="table"`` + ``columnWidths`` regresyonu.
+
+    Sütunlar yok sayılınca hücreler kendi ``w``leriyle çiziliyor, başlık
+    satırıyla veri satırı birbirinden kayıyordu (Foxit'te hizalı görünen
+    tablolar bizde bozuktu). Şablonlar hücreye tasarım aracından kalma dar
+    bir ``w`` bırakır; gerçek ölçü tablodaki sütundur.
+    """
+
+    SABLON = _sablon(
+        '<subform name="Tablo" layout="table" columnWidths="120mm 20mm">'
+        '<subform name="Baslik" layout="row">'
+        '<draw name="b1"><value><text>Sektor</text></value></draw>'
+        '<draw name="b2"><value><text/></value></draw>'
+        "</subform>"
+        '<subform name="Satir" layout="row">'
+        '<field name="h1" w="30mm"><ui><textEdit/></ui></field>'
+        '<field name="h2" w="8mm"><ui><textEdit/></ui></field>'
+        "</subform></subform>"
+    )
+
+    def _stil(self, html: str, ad: str) -> str:
+        parca = html[html.index(f'data-name="{ad}"'):]
+        return parca.split('style="', 1)[1].split('"', 1)[0]
+
+    def test_hucre_kendi_genisligi_yerine_sutunu_alir(self):
+        html = xfa_html.compile_template(self.SABLON).html
+        # 120mm = 340.16pt; hücrenin kendi 30mm'i yok sayılmalı.
+        assert "340.157pt" in self._stil(html, "h1")
+        assert "56.693pt" in self._stil(html, "h2")
+
+    def test_baslik_ve_veri_satiri_ayni_genisligi_paylasir(self):
+        html = xfa_html.compile_template(self.SABLON).html
+        assert self._stil(html, "b1").count("340.157pt") >= 2
+        assert self._stil(html, "b1")[:40] == self._stil(html, "h1")[:40]
+
+    def test_colspan_sutunlari_toplar(self):
+        sablon = _sablon(
+            '<subform name="T" layout="table" columnWidths="10mm 20mm 30mm">'
+            '<subform name="S" layout="row">'
+            '<field name="genis" colSpan="2"><ui><textEdit/></ui></field>'
+            '<field name="dar"><ui><textEdit/></ui></field>'
+            "</subform></subform>"
+        )
+        html = xfa_html.compile_template(sablon).html
+        assert "85.039pt" in self._stil(html, "genis")     # 10+20 mm
+        assert "85.039pt" in self._stil(html, "dar")       # 30 mm
+
+    def test_ic_ice_tablo_dis_sutunlari_kullanmaz(self):
+        """Hücrenin içindeki satır, dıştaki tablonun sütunlarını almamalı."""
+        sablon = _sablon(
+            '<subform name="Dis" layout="table" columnWidths="150mm">'
+            '<subform name="DisSatir" layout="row">'
+            '<subform name="Hucre" layout="row">'
+            '<field name="ic" w="12mm"><ui><textEdit/></ui></field>'
+            "</subform></subform></subform>"
+        )
+        html = xfa_html.compile_template(sablon).html
+        assert "34.016pt" in self._stil(html, "ic")        # kendi 12mm'si
+        assert "425.197pt" not in self._stil(html, "ic")
+
+
+# ======================================================================
+# Gömülü yazı tipleri
+# ======================================================================
+class TestGomuluYaziTipi:
+    """PDF'e gömülü yazı tipi kullanılmazsa metin genişlikleri sapıyor.
+
+    Foxit/Adobe formu gömülü Myriad Pro ile çizer; Arial'e düşülünce satırlar
+    ~%6 uzuyor, etiketler sarıp taşıyor ve tablo başlıkları kayıyordu.
+    """
+
+    def test_postscript_adi_css_ailesine_cevrilir(self):
+        assert xfa._css_font_name("MyriadPro-Regular") == ("Myriad Pro", 400, "normal")
+        assert xfa._css_font_name("ABCDEF+MyriadPro-Bold") == ("Myriad Pro", 700, "normal")
+        assert xfa._css_font_name("TimesNewRomanPSMT") == ("Times New Roman", 400, "normal")
+        assert xfa._css_font_name("ArialMT") == ("Arial", 400, "normal")
+
+    def test_sfnt_tablolari_dorde_hizalanir(self):
+        """Tarayıcının doğrulayıcısı hizasız tabloyu reddediyor.
+
+        ``OTS parsing error: CFF : misaligned table`` -> ``@font-face``
+        sessizce düşüyor ve sayfa sistem yazı tipine geri dönüyordu.
+        """
+        import struct
+
+        govde_a, govde_b = b"AAA", b"BBBBB"          # 3 ve 5 bayt: hizasız
+        ham = (b"OTTO" + struct.pack(">HHHH", 2, 16, 0, 16)
+               + struct.pack(">4sIII", b"CFF ", 0, 44, len(govde_a))
+               + struct.pack(">4sIII", b"DSIG", 0, 47, len(govde_b))
+               + govde_a + govde_b)
+        yeni = xfa._repack_sfnt(ham)
+
+        sayi = struct.unpack(">H", yeni[4:6])[0]
+        assert sayi == 1, "DSIG yeniden yerleşimden sonra geçersiz; atılmalı"
+        etiket, _, konum, boy = struct.unpack(">4sIII", yeni[12:28])
+        assert etiket == b"CFF "
+        assert konum % 4 == 0
+        assert yeni[konum:konum + boy] == govde_a
+
+    def test_bozuk_veri_oldugu_gibi_doner(self):
+        assert xfa._repack_sfnt(b"OTTO\x00\x09") == b"OTTO\x00\x09"
+
+    def test_sablonun_kullanmadigi_aile_gomulmez(self):
+        assert xfa.template_typefaces(
+            b'<font typeface="Myriad Pro"/><font typeface="Courier New"/>'
+        ) == {"myriad pro", "courier new"}
+
+    def test_font_kurallari_stile_girer(self):
+        kural = "@font-face{font-family:'X';src:url(data:font/opentype;base64,AA)}"
+        html = xfa_html.compile_template(_sablon(""), font_css=kural).html
+        assert kural in html
+        assert html.index(kural) < html.index("<body>")
+
+
+# ======================================================================
 # Veri yolu (datasets)
 # ======================================================================
 class TestYinelenenSatirVerisi:

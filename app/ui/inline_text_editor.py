@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.annotations import TextStyle
+from . import theme
 from .dialogs.common import ColorButton
 
 MIN_FONT_SIZE = 6.0
@@ -94,24 +95,25 @@ class FloatingMiniToolbar(QFrame):
         super().__init__(parent)
         self.setObjectName("floatingToolbar")
         self.setFocusPolicy(Qt.NoFocus)
-        self.setStyleSheet("""
-            QFrame#floatingToolbar {
-                background-color: #1E1E2E;
-                border: 1px solid #45475A;
+        p = theme.current()
+        self.setStyleSheet(f"""
+            QFrame#floatingToolbar {{
+                background-color: {p.surface};
+                border: 1px solid {p.border};
                 border-radius: 8px;
-            }
-            QPushButton {
+            }}
+            QPushButton {{
                 background: transparent;
-                color: #CDD6F4;
+                color: {p.text};
                 border: none;
                 border-radius: 4px;
                 font-weight: bold;
                 font-size: 13px;
                 min-width: 24px;
                 min-height: 24px;
-            }
-            QPushButton:hover { background-color: #45475A; }
-            QPushButton:checked { background-color: #89B4FA; color: #11111B; }
+            }}
+            QPushButton:hover {{ background-color: {p.surface_alt}; }}
+            QPushButton:checked {{ background-color: {p.accent}; color: {p.accent_text}; }}
         """)
 
         layout = QHBoxLayout(self)
@@ -124,7 +126,7 @@ class FloatingMiniToolbar(QFrame):
         self.btn_dec_size.clicked.connect(self._decrease_size)
 
         self.lbl_size = QLabel(f"{int(style.size)}pt", self)
-        self.lbl_size.setStyleSheet("color: #BAC2DE; font-size: 11px; padding: 0 4px;")
+        self.lbl_size.setStyleSheet(f"color: {p.text_muted}; font-size: 11px; padding: 0 4px;")
 
         self.btn_inc_size = QPushButton("A^", self)
         self.btn_inc_size.setToolTip("Font boyutunu büyüt")
@@ -157,7 +159,7 @@ class FloatingMiniToolbar(QFrame):
         self.btn_delete.setToolTip("Kutuyu sil (Esc)")
         self.btn_delete.setFocusPolicy(Qt.NoFocus)
         self.btn_delete.setStyleSheet(
-            "QPushButton:hover { background-color: #F38BA8; color: #11111B; }"
+            f"QPushButton:hover {{ background-color: {p.danger}; color: {p.accent_text}; }}"
         )
         self.btn_delete.clicked.connect(self.deleteRequested.emit)
 
@@ -441,7 +443,7 @@ class InlineCanvasTextWidget(QWidget):
                 font-style: {'italic' if self.style.italic else 'normal'};
                 padding: 0px;
                 margin: 0px;
-                selection-background-color: #89B4FA;
+                selection-background-color: {theme.current().selection};
             }}
         """)
         self.editor.setFont(font)
@@ -539,7 +541,7 @@ class InlineCanvasTextWidget(QWidget):
         inner = self._box_rect.adjusted(
             self.BORDER // 2, self.BORDER // 2, -self.BORDER // 2, -self.BORDER // 2
         )
-        painter.setPen(QPen(QColor("#1976D2"), self.BORDER, Qt.DashLine))
+        painter.setPen(QPen(QColor(theme.current().accent), self.BORDER, Qt.DashLine))
         painter.setBrush(QColor(255, 255, 255, 245))
         painter.drawRoundedRect(inner, 3, 3)
         painter.end()

@@ -359,14 +359,12 @@ class DocumentController(QObject):
         """Mevcut belgenin sonuna başka PDF'ler ekler."""
         added = 0
         with self.edit("PDF birleştirme", structural=True):
-            from ..core.pdf_backend import fitz
-
             with self.document.lock:
                 for path, password, ranges in sources:
-                    src = fitz.open(path)
+                    # Dinamik XFA formları statik sayfalara çizilerek eklenir
+                    # (bkz. ``page_ops.open_source``).
+                    src = page_ops.open_source(path, password)
                     try:
-                        if src.needs_pass and not (password and src.authenticate(password)):
-                            raise PdfError(f"Parola gerekiyor: {os.path.basename(path)}")
                         for i in page_ops.parse_page_ranges(ranges, src.page_count):
                             self.document.raw.insert_pdf(src, from_page=i, to_page=i)
                             added += 1

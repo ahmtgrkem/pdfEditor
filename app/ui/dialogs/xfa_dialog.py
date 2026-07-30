@@ -52,7 +52,7 @@ class XfaFormDialog(QDialog):
         palette = theme.current()
 
         baslik = QLabel(
-            f"<h3 style='margin:0'>Etkileşimli form alanları</h3>", self
+            "<h3 style='margin:0'>Etkileşimli form alanları</h3>", self
         )
         baslik.setTextFormat(Qt.RichText)
 

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core import page_ops
+from .. import theme
 from .common import BaseDialog, PathPicker
 
 
@@ -78,7 +79,7 @@ class SplitDialog(BaseDialog):
             parts = self.plan()
         except Exception as exc:  # noqa: BLE001
             self.summary.setText(f"⚠ {exc}")
-            self.summary.setStyleSheet("color: #ef5350;")
+            self.summary.setStyleSheet(f"color: {theme.current().danger};")
             return
         self.summary.setStyleSheet("")
         preview = ", ".join(

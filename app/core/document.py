@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from .pdf_backend import Matrix, Point, Quad, Rect, fitz
 
@@ -48,12 +48,6 @@ class TocEntry:
     level: int
     title: str
     page: int  # 1 tabanlı; 0 => hedef yok
-
-
-@dataclass(frozen=True)
-class SearchHit:
-    page: int
-    rect: tuple[float, float, float, float]  # görsel koordinat
 
 
 #: Gömülü TTF yazı tiplerinde boşluk ve tire glifleri, ters cmap eşlemesi
@@ -249,10 +243,6 @@ class PdfDocument:
             return os.path.basename(self._path)
         return "Adsız.pdf"
 
-    def revision(self, index: int) -> tuple[int, int]:
-        """(yapısal nesil, sayfa revizyonu) — render önbelleği anahtarı."""
-        return self._generation, self._page_revs.get(index, 0)
-
     def mark_dirty(self, page_index: int | None = None, structural: bool = False) -> None:
         """Belgeyi değişmiş olarak işaretler ve ilgili önbelleği geçersizler.
 
@@ -353,17 +343,6 @@ class PdfDocument:
             r = page.rect
             return r.width, r.height
 
-    def page_rotation(self, index: int) -> int:
-        with self._lock:
-            return self.raw.load_page(index).rotation
-
-    def page_label(self, index: int) -> str:
-        with self._lock:
-            try:
-                label = self.raw.load_page(index).get_label()
-            except Exception:  # noqa: BLE001
-                label = ""
-        return label or str(index + 1)
 
     def metadata(self) -> dict:
         with self._lock:
@@ -559,6 +538,3 @@ class PdfDocument:
         with self._lock:
             return self.raw.tobytes(**kwargs)
 
-
-def rect_from(seq: Iterable[float]) -> Rect:
-    return Rect(*seq)
