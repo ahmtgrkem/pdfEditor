@@ -32,6 +32,22 @@ def app_icon() -> QIcon:
     return icons.icon("new", size=64)
 
 
+class _QtTurkce(QTranslator):
+    """Qt'nin Türkçesi; kısayol adları hariç.
+
+    ``qtbase_tr`` tuş adlarını da çeviriyor ve menülerde ``Ctrl+B`` yerine
+    ``Kontrol+B`` yazıyor — Windows'ta hiçbir uygulama böyle göstermez.
+    Tuş adları ``QShortcut`` bağlamında durur; boş dönmek Qt'yi özgün
+    (İngilizce) metne düşürür.
+    """
+
+    def translate(self, context: str, source: str,
+                  disambiguation: str | None = None, n: int = -1) -> str:
+        if context == "QShortcut":
+            return ""
+        return super().translate(context, source, disambiguation, n)
+
+
 def install_translations(app: QApplication) -> QTranslator | None:
     """Qt'nin hazır iletilerini Türkçeleştirir.
 
@@ -46,7 +62,7 @@ def install_translations(app: QApplication) -> QTranslator | None:
     for base in (QLibraryInfo.path(QLibraryInfo.TranslationsPath),
                  resource_path("PySide6", "translations"),
                  resource_path("translations")):
-        translator = QTranslator(app)
+        translator = _QtTurkce(app)
         if base and translator.load(QLocale("tr_TR"), "qtbase", "_", base):
             app.installTranslator(translator)
             return translator
