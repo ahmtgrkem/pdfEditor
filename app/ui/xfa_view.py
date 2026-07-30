@@ -434,8 +434,15 @@ class XfaFormView(QWidget):
         return self._page_count
 
     def _on_alert(self, message: str) -> None:
-        """Şablonun ``app.alert`` çağrıları: kısa uyarılar şeride, uzunları kutuya."""
-        if len(message) > 120 or "\n" in message:
-            QMessageBox.information(self, "Form", message)
-        else:
-            self.status.emit(message)
+        """Şablonun ``app.alert`` çağrıları uyarı kutusunda gösterilir.
+
+        XFA'da ``app.alert`` kalıcı bir uyarı kutusudur; alan doğrulama
+        iletileri (ör. "e-posta: geçersiz biçim") buradan gelir ve Adobe/Foxit
+        bunları kutuda gösterir. Kısa iletiler durum çubuğuna yazıldığında
+        kullanıcı uyarıyı hiç görmüyordu — form da alanı sessizce boşaltıyordu.
+        """
+        message = (message or "").strip()
+        if not message:
+            return
+        self.status.emit(message)      # durum çubuğunda iz kalsın
+        QMessageBox.warning(self, "Form", message)

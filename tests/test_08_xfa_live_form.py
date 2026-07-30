@@ -37,6 +37,61 @@ def _sablon(govde: str, ekstra_kok: str = "") -> bytes:
 
 
 @pytest.fixture
+def dogrulama_sablonu() -> bytes:
+    """Alandan çıkışta biçim denetleyip ``app.alert`` gösteren form.
+
+    Gerçek kurumsal formlar doğrulamayı ``<validate>`` yerine ``exit``
+    olayındaki betikle yapar (e-posta biçimi böyle denetleniyor).
+    """
+    return _sablon(
+        '<subform name="Iletisim" layout="tb" w="190mm">'
+        '  <field name="eposta" w="120mm" h="7mm">'
+        '    <ui><textEdit/></ui>'
+        '    <caption><value><text>E-posta</text></value></caption>'
+        '    <event activity="exit">'
+        '      <script contentType="application/x-javascript">'
+        'var r = new RegExp("^[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+\.[a-zA-Z]+$");'
+        'if (!r.test(this.rawValue)) { app.alert("E-posta: Gecersiz bicim");'
+        ' this.rawValue = ""; }'
+        '      </script>'
+        '    </event>'
+        '  </field>'
+        '</subform>'
+    )
+
+
+@pytest.fixture
+def tablo_sablonu() -> bytes:
+    """Tekrarlanabilir satırı olan tablo — "+" ile satır eklenir."""
+    return _sablon(
+        '<subform name="T" layout="table" columnWidths="60mm 60mm 20mm" w="190mm">'
+        '  <subform name="baslik" layout="row" w="190mm" h="8mm">'
+        '    <draw name="b1" w="60mm" h="8mm">'
+        '      <value><text>Ad</text></value></draw>'
+        '    <draw name="b2" w="60mm" h="8mm">'
+        '      <value><text>Soyad</text></value></draw>'
+        '    <draw name="b3" w="20mm" h="8mm">'
+        '      <value><text>#</text></value></draw>'
+        '  </subform>'
+        '  <subform name="satir" layout="row" w="190mm" h="8mm">'
+        '    <occur min="1" max="5"/>'
+        '    <field name="ad" w="60mm" h="6mm"><ui><textEdit/></ui></field>'
+        '    <field name="soyad" w="60mm" h="6mm"><ui><textEdit/></ui></field>'
+        '    <field name="ekle" w="20mm" h="6mm">'
+        '      <ui><button/></ui>'
+        '      <caption><value><text>+</text></value></caption>'
+        '      <event activity="click">'
+        '        <script contentType="application/x-javascript">'
+        'xfa.resolveNode("form.T.satir").instanceManager.addInstance(1);'
+        '        </script>'
+        '      </event>'
+        '    </field>'
+        '  </subform>'
+        '</subform>'
+    )
+
+
+@pytest.fixture
 def kosullu_sablon() -> bytes:
     """Seçime göre bir bölümü açan form — dinamik XFA'nın çekirdek davranışı."""
     return _sablon(
@@ -463,6 +518,108 @@ class TestCanliMotor:
         gorunum = self._yukle(qapp, kosullu_sablon, {"form.Bolum.Tur": "K"})
         try:
             assert self._js(qapp, gorunum, GIZLI_MI) == "visible"
+        finally:
+            gorunum.deleteLater()
+
+    def test_gecersiz_bicimde_uyari_kutusu_cikar(self, qapp, dogrulama_sablonu,
+                                                 monkeypatch):
+        """``app.alert`` kutuda gösterilmeli, durum çubuğunda kaybolmamalı."""
+        from PySide6.QtWidgets import QMessageBox
+
+        kutular: list = []
+        monkeypatch.setattr(QMessageBox, "warning",
+                            staticmethod(lambda *a, **k: kutular.append(a[2])))
+
+        gorunum = self._yukle(qapp, dogrulama_sablonu)
+        try:
+            # Köprü kurulmadan ``app.alert`` şeride düşer; önce beklenir.
+            for _ in range(60):
+                if self._js(qapp, gorunum, "!!window.xfaHost"):
+                    break
+                _bekle(50)
+            else:
+                pytest.fail("xfaHost köprüsü kurulmadı")
+
+            # Geçersiz değer yaz ve alandan çık (offscreen'de blur() yetmiyor,
+            # focusout açıkça gönderilir).
+            self._js(qapp, gorunum, """
+                (function () {
+                  var g = document.querySelector('[data-som="form.Iletisim.eposta"]');
+                  var alan = g.querySelector('input');
+                  alan.focus();
+                  alan.value = 'ASDASDASD';
+                  alan.dispatchEvent(new Event('input', {bubbles: true}));
+                  alan.blur();
+                  alan.dispatchEvent(new Event('focusout', {bubbles: true}));
+                  return 'ok';
+                })()
+            """)
+            for _ in range(40):
+                qapp.processEvents()
+                if kutular:
+                    break
+                _bekle(50)
+            assert kutular, "Geçersiz biçimde uyarı kutusu gösterilmeli"
+            assert "Gecersiz bicim" in kutular[0]
+
+            # Betik alanı boşaltmış olmalı (Foxit de böyle yapıyor)
+            kalan = self._js(qapp, gorunum, """
+                document.querySelector('[data-som="form.Iletisim.eposta"] input').value
+            """)
+            assert kalan == "", "Geçersiz değer temizlenmeli"
+        finally:
+            gorunum.deleteLater()
+
+    def test_eklenen_tablo_satiri_yan_yana_kalir(self, qapp, tablo_sablonu):
+        """Satır klonu ``display:flex``ini korumalı.
+
+        Örnek eklenirken ``style.display`` sıfırlanıyordu; ``layout="row"``
+        alt formunun satır düzeni de bu bildirimde durduğu için eklenen
+        satırın hücreleri alt alta düşüyordu (Foxit'te yan yana duruyor).
+        """
+        gorunum = self._yukle(qapp, tablo_sablonu)
+        try:
+            olc = """
+            (function () {
+              var sec = '[data-som="form.T.satir"]';
+              var hepsi = document.querySelectorAll(sec);
+              var son = hepsi[hepsi.length - 1];
+              var c = son.children;
+              var ilk = c[0].getBoundingClientRect();
+              var sonr = c[c.length - 1].getBoundingClientRect();
+              return JSON.stringify({
+                sayi: hepsi.length,
+                display: getComputedStyle(son).display,
+                ayni_satir: Math.abs(ilk.top - sonr.top) < 6,
+                yan_yana: sonr.left > ilk.right - 2
+              });
+            })()
+            """
+            once = json.loads(self._js(qapp, gorunum, olc))
+            assert once["sayi"] == 1
+            assert once["display"] == "flex"
+
+            # Şablonun kendi "+" düğmesine bas
+            self._js(qapp, gorunum, """
+                (function () {
+                  var d = document.querySelectorAll('button.xbtn');
+                  for (var i = 0; i < d.length; i++) {
+                    if (d[i].textContent.trim() === '+') { d[i].click(); return 'ok'; }
+                  }
+                  return 'dugme yok';
+                })()
+            """)
+            for _ in range(20):
+                sonra = json.loads(self._js(qapp, gorunum, olc))
+                if sonra["sayi"] > 1:
+                    break
+                _bekle(50)
+            assert sonra["sayi"] == 2, "satır eklenmeli"
+            assert sonra["display"] == "flex", (
+                "eklenen satır flex kalmalı; block olursa hücreler alt alta düşer"
+            )
+            assert sonra["ayni_satir"], "hücreler aynı satırda olmalı"
+            assert sonra["yan_yana"], "hücreler yan yana dizilmeli"
         finally:
             gorunum.deleteLater()
 

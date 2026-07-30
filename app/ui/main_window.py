@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from .. import __app_name__, __version__
 from ..core import docx_export, exporter, page_ops, xfa, xfa_render
-from ..core.document import PasswordRequired, PdfError
+from ..core.document import PasswordRequired, PdfDocument, PdfError
 from ..services.document_controller import DocumentController
 from ..services.settings import AppSettings
 from ..services.updater import UpdaterService
@@ -664,7 +664,6 @@ class MainWindow(QMainWindow):
                 "rotate_all_ccw", "page_add", "page_duplicate", "page_extract",
                 "page_delete", "watermark", "export_images", "export_text",
                 "compress", "copy", "find", "find_next", "find_prev", "split",
-                "export_word",
             ):
                 self._actions[key].setEnabled(False)
             for action in self.tool_actions.values():
@@ -941,6 +940,47 @@ class MainWindow(QMainWindow):
         """Betikle açılan bölümler dâhil, formun tamamını çizer."""
         self.render_xfa_form(show_hidden=True)
 
+    def _xfa_template_and_values(self) -> tuple[bytes, dict] | None:
+        """Çizim için şablonu ve o anki değerleri çözer.
+
+        Canlı görünüme yazılanlar ``datasets`` paketine henüz işlenmemiş
+        olabilir; kullanıcının gördüğü değerlerle çizmek için üzerine yazılır.
+        Belge zaten çizilmişse saklanan kaynak şablon kullanılır.
+        """
+        form = self.current_xfa_form()
+        if form is not None:
+            ham = self.controller.document.raw
+            paketler = xfa.read_packets(ham)
+            if "template" not in paketler:
+                return None
+            sablon = xfa.packet_data(ham, paketler["template"])
+            degerler = form.as_values()
+        elif self._xfa_source is not None:
+            sablon, degerler = self._xfa_source
+        else:
+            return None
+
+        if self.in_xfa_mode:
+            canli = self.xfa_view.values_blocking()
+            if canli:
+                degerler = {**degerler, **canli}
+        return sablon, degerler
+
+    def _xfa_static_document(self, show_hidden: bool = False):
+        """Formun çizilmiş hâlini **geçici** bir belge olarak döndürür.
+
+        Dinamik XFA'nın sayfa akışı yalnızca "Adobe Reader gerekir" uyarı
+        sayfasıdır; dışa aktarmalar açık belgeyi kullanırsa çıktıya form değil
+        o uyarı giriyordu. Çağıran döndürülen belgeyi ``close()`` etmelidir.
+        """
+        kaynak = self._xfa_template_and_values()
+        if kaynak is None:
+            return None
+        veri = xfa_render.render_bytes(kaynak[0], kaynak[1], show_hidden=show_hidden)
+        belge = PdfDocument()
+        belge.open_stream(veri)
+        return belge
+
     def render_xfa_form(self, show_hidden: bool = False,
                         silent: bool = False) -> bool:
         """XFA şablonunu çizip görüntülenebilir bir belge olarak açar.
@@ -950,33 +990,15 @@ class MainWindow(QMainWindow):
         doldurulabilir. ``silent`` otomatik açılış içindir: başarısızlıkta
         uyarı kutusu gösterilmez, ``False`` döner.
         """
-        form = self.current_xfa_form()
-        if form is not None:
-            paketler = xfa.read_packets(self.controller.document.raw)
-            if "template" not in paketler:
-                return False
-            sablon = xfa.packet_data(
-                self.controller.document.raw, paketler["template"]
-            )
-            degerler = form.as_values()
-        elif self._xfa_source is not None:
-            # Belge zaten çizilmiş; kaynak şablondan diğer görünüm üretilir.
-            sablon, degerler = self._xfa_source
-        else:
+        kaynak_veri = self._xfa_template_and_values()
+        if kaynak_veri is None:
             if not silent:
                 QMessageBox.information(
                     self, "Formu görüntüle",
                     "Bu belgede XFA formu bulunamadı.",
                 )
             return False
-
-        if self.in_xfa_mode:
-            # Canlı görünüme yazılanlar henüz ``datasets`` paketine
-            # işlenmemiş olabilir; çizim kullanıcının gördüğü değerlerle
-            # yapılmalı, yoksa doldurduğu alanlar boş çıkıyor.
-            canli = self.xfa_view.values_blocking()
-            if canli:
-                degerler = {**degerler, **canli}
+        sablon, degerler = kaynak_veri
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -1586,18 +1608,33 @@ class MainWindow(QMainWindow):
             return False
         if not path.lower().endswith(".docx"):
             path += ".docx"
+
+        # Etkileşimli (dinamik XFA) formda belge akışı yalnızca "Adobe Reader
+        # gerekir" uyarı sayfasıdır; Word'e o sayfa değil formun kendisi
+        # gitmeli. Form burada geçici olarak çizilir. Tüm bölümler çizilir:
+        # betikle açılan bölümler şablonda "gizli" durduğu için yalnızca
+        # görünen yerleşim aktarılsa doldurulan alanlar Word'e hiç girmezdi.
+        form_mu = self.in_xfa_mode or xfa.is_dynamic(self.controller.document.raw)
+        gecici = None
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            docx_export.export_docx(self.controller.document, path)
+            if form_mu:
+                gecici = self._xfa_static_document(show_hidden=True)
+            docx_export.export_docx(gecici or self.controller.document, path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Word'e aktar", f"Aktarılamadı:\n{exc}")
             return False
         finally:
+            if gecici is not None:
+                gecici.close()
             if QApplication.overrideCursor() is not None:
                 QApplication.restoreOverrideCursor()
 
         self.settings.last_directory = os.path.dirname(path)
-        self.show_message(f"Word belgesi kaydedildi: {os.path.basename(path)}")
+        ek = " (form tüm bölümleriyle çizilerek aktarıldı)" if form_mu else ""
+        self.show_message(
+            f"Word belgesi kaydedildi{ek}: {os.path.basename(path)}"
+        )
         self._offer_open_external(path)
         return True
 

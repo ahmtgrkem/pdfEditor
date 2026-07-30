@@ -389,8 +389,10 @@ function manager(el) {
     var box = document.createElement('div');
     box.innerHTML = html;
     var fresh = box.firstElementChild;
-    // Kalıp gizliyse bile eklenen örnek görünür olmalı.
-    fresh.style.display = '';
+    // Kalıp gizliyse bile eklenen örnek görünür olmalı. Düzenin kendi
+    // ``display``i korunur: satırlar ``flex`` olmadan hücreleri alt alta
+    // dizer (eklenen tablo satırları böyle bozuluyordu).
+    fresh.style.display = defaultDisplay(fresh);
     fresh.dataset.presence = 'visible';
     return fresh;
   }
@@ -485,16 +487,26 @@ function resolveFrom(startEl, expr, wantList) {
 // ==================================================================
 // Görünürlük ve sayfalama
 // ==================================================================
+/** Kabın gizlilikten çıkınca dönmesi gereken ``display`` değeri.
+ *
+ *  ``display:''`` yazmak yetmiyor: ``layout="row"`` alt formları satır
+ *  olabilmek için ``display:flex`` taşır ve bu değer de silinir; hücreler
+ *  alt alta düşer (tablo satırları ve tekrar eden satırlar bozuluyordu).
+ */
+function defaultDisplay(el) {
+  return (el.dataset && el.dataset.layout === 'row') ? 'flex' : '';
+}
+
 function setPresence(el, v) {
   el.dataset.presence = v;
   if (v === 'hidden' || v === 'inactive') {
     el.style.display = 'none';
     el.style.visibility = '';
   } else if (v === 'invisible') {
-    el.style.display = '';
+    el.style.display = defaultDisplay(el);
     el.style.visibility = 'hidden';
   } else {
-    el.style.display = '';
+    el.style.display = defaultDisplay(el);
     el.style.visibility = '';
   }
   schedule();

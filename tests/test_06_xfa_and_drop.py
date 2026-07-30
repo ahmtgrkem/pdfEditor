@@ -292,6 +292,28 @@ class TestXfaBirlestirme:
         assert "Ad Soyad" in metin
 
 
+    def test_word_aktarmada_form_cizilir(self, window, xfa_pdf, qapp, monkeypatch,
+                                         tmp_path):
+        """Word'e aktarmada uyarı sayfası değil formun kendisi gitmeli.
+
+        Dinamik XFA'nın sayfa akışı "Adobe Reader gerekir" sayfasından
+        oluşuyor; Word çıktısına da o giriyordu.
+        """
+        import zipfile
+
+        monkeypatch.setattr(window, "_offer_open_external", lambda yol: None)
+        assert window.open_path(str(xfa_pdf)) is True
+        pump(qapp)
+
+        hedef = tmp_path / "form.docx"
+        assert window.export_word(str(hedef)) is True
+        with zipfile.ZipFile(hedef) as paket:
+            govde = paket.read("word/document.xml").decode("utf-8")
+        govde = govde.replace(" ", " ")
+        assert "Ad Soyad" in govde, "Form alanları Word'e girmeli"
+        assert "Adobe Reader" not in govde, "Uyarı sayfası aktarılmamalı"
+
+
 class TestXfaYazma:
     def test_degerler_yazilip_geri_okunur(self, xfa_pdf, tmp_path):
         d = pymupdf.open(str(xfa_pdf))
